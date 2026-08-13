@@ -3,6 +3,7 @@ import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/con
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
 import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
+import { disableCodexAccountOnQuota } from "./codexQuotaGuard.js";
 import * as log from "../utils/logger.js";
 
 // Mutex to prevent race conditions during account selection
@@ -242,6 +243,11 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
+
+  // Codex usage-limit guard: hard-disable the account in the DB until the 24h re-check window
+  if (Number(status) === 429 && resolveProviderId(provider) === "codex") {
+    await disableCodexAccountOnQuota(connectionId, provider, status, reason);
+  }
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
