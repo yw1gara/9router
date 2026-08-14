@@ -22,6 +22,20 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import {
+  recordProviderFailure,
+  clearProviderFailure,
+  isProviderFullyBlocked,
+  getProviderShortestCooldownMs,
+  isProviderExhaustedReason,
+} from "open-sse/services/accountFallback.js";
+import { maybeWaitForCooldown, MAX_COOLDOWN_RETRIES } from "open-sse/utils/cooldownRetry.js";
+import {
+  acquire as acquireAccountSemaphore,
+  isSemaphoreCapacityError,
+  resolveAccountSemaphoreKey,
+  resolveAccountSemaphoreMaxConcurrency,
+} from "open-sse/services/accountSemaphore.js";
 
 /**
  * Handle chat completion request
@@ -228,13 +242,63 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const excludeConnectionIds = new Set();
   let lastError = null;
   let lastStatus = null;
+  let cooldownRetries = 0;
+
+  // Pipeline gate: if the provider's circuit breaker is OPEN on all buckets,
+  // short-circuit BEFORE any credential lookup — no point querying the DB.
+  if (isProviderFullyBlocked(provider)) {
+    const remainingMs = getProviderShortestCooldownMs(provider);
+    const retryHuman = remainingMs > 0 ? `${Math.ceil(remainingMs / 1000)}s` : "soon";
+    log.warn("GATE", `${provider} circuit breaker OPEN — short-circuiting before credential lookup`);
+    return unavailableResponse(
+      HTTP_STATUS.SERVICE_UNAVAILABLE,
+      `[${provider}/${model}] Provider temporarily unavailable (circuit breaker open)`,
+      remainingMs > 0 ? new Date(Date.now() + remainingMs).toISOString() : null,
+      retryHuman
+    );
+  }
 
   while (true) {
+    // Abort check: stop trying accounts if the client already disconnected.
+    // Prevents wasted upstream calls and circuit-breaker probe hits on a dead
+    // connection.
+    if (request?.signal?.aborted) {
+      log.info("CHAT", `[${provider}/${model}] client disconnected — aborting fallback loop`);
+      return new Response(null, { status: 499 });
+    }
+
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
       if (credentials?.allRateLimited) {
+        // Provider-exhaustion detection: when the last error signals provider-wide
+        // quota/credit exhaustion, waiting for a cooldown is pointless — skip the
+        // cooldown retry and fail over to the unavailable response immediately.
+        const exhausted = isProviderExhaustedReason(lastError || credentials.lastError || "");
+        // Cooldown-aware retry: if the earliest account comes off cooldown soon,
+        // wait for it (aborted on client disconnect) then retry once.
+        if (!exhausted && credentials.retryAfter && cooldownRetries < MAX_COOLDOWN_RETRIES) {
+          const waitDecision = await maybeWaitForCooldown({
+            retryAfter: credentials.retryAfter,
+            retriesSoFar: cooldownRetries,
+            signal: request?.signal,
+          });
+          if (waitDecision.shouldRetry) {
+            cooldownRetries++;
+            log.info("CHAT", `[${provider}/${model}] all accounts rate-limited — waited ${waitDecision.waitedMs}ms, retrying (attempt ${cooldownRetries})`);
+            // Re-enter the loop WITHOUT excluding accounts — they may be usable now.
+            continue;
+          }
+          if (waitDecision.reason === "client_disconnected") {
+            log.info("CHAT", `[${provider}/${model}] client disconnected during cooldown wait — aborting`);
+            // Return a minimal response; client is gone anyway.
+            return new Response(null, { status: 499 });
+          }
+          log.info("CHAT", `[${provider}/${model}] cooldown retry skipped: ${waitDecision.reason}`);
+        } else if (exhausted) {
+          log.warn("CHAT", `[${provider}/${model}] provider quota exhausted — skipping cooldown retry`);
+        }
         const errorMsg = lastError || credentials.lastError || "Unavailable";
         const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
         log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
@@ -264,7 +328,32 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // Use shared chatCore
     const chatSettings = await getSettings();
     const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
-    const result = await handleChatCore({
+
+    // Account semaphore: cap concurrent requests per account (prevents 429
+    // cascades when many parallel requests land on the same credential).
+    // Bypassable per-account via providerSpecificData.maxConcurrency = 0.
+    const semaphoreKey = resolveAccountSemaphoreKey({ provider, connectionId: credentials.connectionId });
+    const semaphoreMax = resolveAccountSemaphoreMaxConcurrency(refreshedCredentials);
+    let semaphoreRelease = () => {};
+    if (semaphoreKey && semaphoreMax != null) {
+      try {
+        semaphoreRelease = await acquireAccountSemaphore(semaphoreKey, {
+          maxConcurrency: semaphoreMax,
+          timeoutMs: 30_000,
+        });
+      } catch (e) {
+        if (isSemaphoreCapacityError(e)) {
+          log.warn("AUTH", `Account ${credentials.connectionName} at capacity, trying fallback`);
+          excludeConnectionIds.add(credentials.connectionId);
+          continue;
+        }
+        throw e;
+      }
+    }
+
+    let result;
+    try {
+      result = await handleChatCore({
       body: { ...body, model: `${provider}/${model}` },
       modelInfo: { provider, model },
       credentials: refreshedCredentials,
@@ -300,13 +389,22 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
+        clearProviderFailure(provider);
       }
     });
+    } finally {
+      // Always release the semaphore slot, even if handleChatCore throws
+      semaphoreRelease();
+    }
 
     if (result.success) return result.response;
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+
+    // Record provider-level failure for the circuit breaker (5xx/timeout only;
+    // 429 stays per-account). Deduplicated per connection within 5s.
+    recordProviderFailure(provider, result.status, typeof result.error === "string" ? result.error : result.error?.message, log, credentials.connectionId);
 
     if (shouldFallback) {
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
