@@ -381,10 +381,15 @@ export function isModelAccessDeniedError(status, errorText) {
   const text = typeof errorText === "string" ? errorText.toLowerCase() : "";
   if (!text && !status) return false;
 
+  // Only HTTP statuses that providers use for model-access/subscription denials
+  // are accepted. 401 (auth) and 429 (rate-limit) and 5xx are NEVER model-access
+  // — they are handled by their own ERROR_RULES / checkFallbackError path.
+  if (![400, 402, 403, 404, 405, 415, 451].includes(Number(status))) return false;
+
   // Status-based: 404 model-not-found / deployment-not-found
   if (Number(status) === 404) return true;
 
-  // Text-based patterns (cover 400/403/404 with descriptive bodies)
+  // Text-based patterns for 400/402/403/405/415/451 bodies
   const MODEL_ACCESS_DENIED_PATTERNS = [
     "model not found",
     "model_not_found",
@@ -401,7 +406,6 @@ export function isModelAccessDeniedError(status, errorText) {
     "permission denied",
     "not authorized",
     "not allowed to use",
-    "does not have access",
     "has not been authorized",
     "not authorized to use",
     "insufficient scope",

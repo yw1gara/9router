@@ -240,9 +240,11 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     // Model-access/subscription mismatch: lock THIS model for THIS account for
     // 1 minute so the combo skips it without spamming the model. Sibling models
     // on the same account stay usable — only the denied model is quarantined.
+    // Do NOT touch backoffLevel here: a genuine model denial must not reset the
+    // account's rate-limit escalation state.
     shouldFallback = true;
     cooldownMs = 60 * 1000;
-    newBackoffLevel = 0;
+    newBackoffLevel = backoffLevel;
   } else {
     ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
   }
