@@ -371,6 +371,63 @@ export function getProviderShortestCooldownMs(provider) {
 }
 
 /**
+ * Returns true when an error signals that the account/key does not have
+ * access to or a subscription for the requested model. This is NOT a
+ * transient failure — retrying immediately would just hit the same wall —
+ * so the caller should lock the model for this account only, leaving
+ * sibling models on the same account usable.
+ */
+export function isModelAccessDeniedError(status, errorText) {
+  const text = typeof errorText === "string" ? errorText.toLowerCase() : "";
+  if (!text && !status) return false;
+
+  // Status-based: 404 model-not-found / deployment-not-found
+  if (Number(status) === 404) return true;
+
+  // Text-based patterns (cover 400/403/404 with descriptive bodies)
+  const MODEL_ACCESS_DENIED_PATTERNS = [
+    "model not found",
+    "model_not_found",
+    "model does not exist",
+    "does not exist",
+    "deployment not found",
+    "deployment_not_found",
+    "model not supported",
+    "model_not_supported",
+    "do not have access",
+    "does not have access",
+    "no access",
+    "access denied",
+    "permission denied",
+    "not authorized",
+    "not allowed to use",
+    "does not have access",
+    "has not been authorized",
+    "not authorized to use",
+    "insufficient scope",
+    "model is not accessible",
+    "model is blocked",
+    "model access is blocked",
+    "restricted model",
+    "model is restricted",
+    "no subscription",
+    "subscription needed",
+    "subscription required",
+    "not subscribed",
+    "billing limit reached",
+    "upgrade your plan",
+    "pricingurl",
+    "pricing url",
+    "plan does not include",
+    "not available for your plan",
+    "not included in your plan",
+    "model is not available on your plan",
+  ];
+
+  return MODEL_ACCESS_DENIED_PATTERNS.some((p) => text.includes(p));
+}
+
+/**
  * Returns true when an error signals that the entire provider quota
  * is exhausted (not just one account) — waiting for a cooldown won't
  * help, so callers should fail over immediately instead of retrying.
