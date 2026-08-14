@@ -384,3 +384,34 @@ export function isProviderExhaustedReason(result) {
   // Covers both word orders: "quota exhausted" and "exhausted your quota".
   return /credits?.{0,20}exhausted|exhausted.{0,20}credits?|quota.{0,20}exhausted|exhausted.{0,20}quota|no remaining credits|insufficient.{0,20}credits|payment.{0,10}required|quota.{0,20}exceeded|rate.?limit.{0,20}reached/i.test(text);
 }
+
+/**
+ * Update per-request combo exhaustion without globally disabling sibling accounts.
+ * Returns true only when the provider itself is considered exhausted.
+ */
+export function applyComboTargetExhaustion(provider, connectionId, model, status, errorText, sets, log) {
+  if (!provider || !sets) return false;
+  const isAuthError = status === 401 || status === 403;
+  const isConnectionError = [408, 500, 502, 503, 504, 524].includes(status);
+
+  if (isAuthError || isConnectionError) {
+    if (connectionId) {
+      sets.exhaustedConnections.add(`${provider}:${connectionId}`);
+      log?.info?.("COMBO", `Provider ${provider} connection ${String(connectionId).slice(0, 8)} error (${status}) — excluding remaining targets`);
+    } else {
+      sets.exhaustedProviders.add(`${provider}:${model || "*"}`);
+      log?.info?.("COMBO", `Provider ${provider} error (${status}) — excluding remaining targets`);
+    }
+    return false;
+  }
+
+  if (isProviderExhaustedReason(errorText)) {
+    // Quota scopes differ by upstream. Keep this request-local skip model-scoped
+    // so a sibling model can still use a healthy account/provider.
+    sets.exhaustedProviders.add(`${provider}:${model || "*"}`);
+    log?.info?.("COMBO", `Provider ${provider} model ${model || "*"} quota exhausted — excluding remaining targets`);
+    return true;
+  }
+
+  return false;
+}

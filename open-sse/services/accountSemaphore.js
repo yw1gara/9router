@@ -41,6 +41,7 @@ function ensureGate(semaphoreKey, maxConcurrency) {
     maxConcurrency,
     queue: [],
     blockedUntil: null,
+    blockedTimer: null,
     cleanupTimer: null,
   };
   gates.set(semaphoreKey, gate);
@@ -53,6 +54,10 @@ function cleanupGateIfIdle(semaphoreKey, gate) {
     if (gate.cleanupTimer) {
       clearTimeout(gate.cleanupTimer);
       gate.cleanupTimer = null;
+    }
+    if (gate.blockedTimer) {
+      clearTimeout(gate.blockedTimer);
+      gate.blockedTimer = null;
     }
     gates.delete(semaphoreKey);
   }
@@ -80,6 +85,12 @@ export function acquire(semaphoreKey, options = {}) {
 
   if (isBypassed(maxConcurrency)) {
     return Promise.resolve(() => {});
+  }
+
+  // Reject immediately if the signal is already aborted — the event listener
+  // below would never fire because the signal is already settled.
+  if (signal?.aborted) {
+    return Promise.reject(signal.reason || new Error("Aborted"));
   }
 
   const gate = ensureGate(semaphoreKey, maxConcurrency);
@@ -180,6 +191,20 @@ export function markBlocked(semaphoreKey, durationMs) {
   if (!gate.blockedUntil || gate.blockedUntil < until) {
     gate.blockedUntil = until;
   }
+  // Clear any previous auto-clear timer before scheduling a new one, so
+  // repeated 429s extend the block without accumulating timers.
+  if (gate.blockedTimer) {
+    clearTimeout(gate.blockedTimer);
+    gate.blockedTimer = null;
+  }
+  const delayMs = Math.max(0, gate.blockedUntil - Date.now());
+  gate.blockedTimer = setTimeout(() => {
+    gate.blockedTimer = null;
+    if (gate.blockedUntil && Date.now() >= gate.blockedUntil) {
+      gate.blockedUntil = null;
+      drainQueue(semaphoreKey, gate);
+    }
+  }, delayMs);
 }
 
 /**

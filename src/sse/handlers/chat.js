@@ -28,10 +28,12 @@ import {
   isProviderFullyBlocked,
   getProviderShortestCooldownMs,
   isProviderExhaustedReason,
+  applyComboTargetExhaustion,
 } from "open-sse/services/accountFallback.js";
 import { maybeWaitForCooldown, MAX_COOLDOWN_RETRIES } from "open-sse/utils/cooldownRetry.js";
 import {
   acquire as acquireAccountSemaphore,
+  markBlocked as markAccountSemaphoreBlocked,
   isSemaphoreCapacityError,
   resolveAccountSemaphoreKey,
   resolveAccountSemaphoreMaxConcurrency,
@@ -131,12 +133,17 @@ export async function handleChat(request, clientRawRequest = null) {
     }
 
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
+    const exhaustionSets = {
+      exhaustedProviders: new Set(),
+      exhaustedConnections: new Set(),
+      transientRateLimitedProviders: new Set()
+    };
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets),
         adapterAdded
       ),
       log,
@@ -174,7 +181,7 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, exhaustionSets = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -201,7 +208,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets);
           },
           log,
           comboName: modelStr,
@@ -216,7 +223,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets),
           adapterAdded
         ),
         log,
@@ -238,6 +245,14 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
 
+  // Per-request exhaustion sets: shared across combo legs so one bad
+  // connection does not kill healthy sibling connections on the same provider.
+  const sets = exhaustionSets || {
+    exhaustedProviders: new Set(),
+    exhaustedConnections: new Set(),
+    transientRateLimitedProviders: new Set()
+  };
+
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
   let lastError = null;
@@ -258,6 +273,16 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     );
   }
 
+  // If the provider was already marked exhausted earlier in this request
+  // (e.g. a previous combo leg got a quota-exhausted response), skip it.
+  if (sets.exhaustedProviders.has(`${provider}:${model}`)) {
+    log.info("CHAT", `[${provider}/${model}] provider already exhausted this request — skipping`);
+    return errorResponse(
+      lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE,
+      lastError || `[${provider}/${model}] Provider exhausted this request`
+    );
+  }
+
   while (true) {
     // Abort check: stop trying accounts if the client already disconnected.
     // Prevents wasted upstream calls and circuit-breaker probe hits on a dead
@@ -268,6 +293,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+
+    // Skip connections already exhausted in this request (e.g. a previous
+    // combo leg got an auth/connection error on the same connection).
+    if (credentials && !credentials.allRateLimited &&
+        sets.exhaustedConnections.has(`${provider}:${credentials.connectionId}`)) {
+      excludeConnectionIds.add(credentials.connectionId);
+      log.info("CHAT", `[${provider}/${model}] connection ${credentials.connectionId?.slice(0, 8)} already exhausted this request — skipping`);
+      continue;
+    }
 
     // All accounts unavailable
     if (!credentials || credentials.allRateLimited) {
@@ -340,8 +374,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         semaphoreRelease = await acquireAccountSemaphore(semaphoreKey, {
           maxConcurrency: semaphoreMax,
           timeoutMs: 30_000,
+          signal: request?.signal ?? null,
         });
       } catch (e) {
+        if (request?.signal?.aborted) {
+          log.info("CHAT", `[${provider}/${model}] client disconnected while waiting for account semaphore — aborting`);
+          return new Response(null, { status: 499 });
+        }
         if (isSemaphoreCapacityError(e)) {
           log.warn("AUTH", `Account ${credentials.connectionName} at capacity, trying fallback`);
           excludeConnectionIds.add(credentials.connectionId);
@@ -400,11 +439,24 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (result.success) return result.response;
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+    const { shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
 
     // Record provider-level failure for the circuit breaker (5xx/timeout only;
     // 429 stays per-account). Deduplicated per connection within 5s.
     recordProviderFailure(provider, result.status, typeof result.error === "string" ? result.error : result.error?.message, log, credentials.connectionId);
+
+    // Block the account's semaphore gate on 429 so requests already queued for
+    // this account do not hit it again before the DB cooldown is read back.
+    if (semaphoreKey && Number(result.status) === 429 && cooldownMs > 0) {
+      markAccountSemaphoreBlocked(semaphoreKey, cooldownMs);
+      log.info("SEMAPHORE", `Account ${credentials.connectionName} gate blocked for ${Math.round(cooldownMs / 1000)}s [429]`);
+    }
+
+    // Per-request exhaustion tracking: an auth (401/403) or connection-level
+    // (408/5xx/524) failure marks only this connection exhausted — sibling
+    // connections on the same provider stay eligible for the rest of the request.
+    const errorText = typeof result.error === "string" ? result.error : (result.error?.message || "");
+    applyComboTargetExhaustion(provider, credentials.connectionId, model, result.status, errorText, sets, log);
 
     if (shouldFallback) {
       log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
