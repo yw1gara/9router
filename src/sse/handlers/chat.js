@@ -128,7 +128,9 @@ export async function handleChat(request, clientRawRequest = null) {
       log,
       comboName: modelStr,
       comboStrategy,
-      comboStickyLimit
+      comboStickyLimit,
+      signal: request?.signal ?? null,
+      timeoutMs: comboStrategies[modelStr]?.targetTimeoutMs
     });
   }
 
@@ -147,7 +149,8 @@ export async function handleChat(request, clientRawRequest = null) {
       ),
       log,
       comboName: modelStr,
-      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings)
+      comboStrategy: getActiveAdapterStrategy(requiredCapabilities, settings),
+      signal: request?.signal ?? null
     });
   }
 
@@ -205,7 +208,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         log,
         comboName: modelStr,
         comboStrategy,
-        comboStickyLimit
+        comboStickyLimit,
+        signal: request?.signal ?? null,
+        timeoutMs: comboStrategies[modelStr]?.targetTimeoutMs
       });
     }
     log.warn("CHAT", "Invalid model format", { model: modelStr });
