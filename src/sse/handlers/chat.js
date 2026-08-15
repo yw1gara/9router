@@ -112,18 +112,27 @@ export async function handleChat(request, clientRawRequest = null) {
     const augmentedModels = augmentModelsWithCapacityAdapter(comboModels, requiredCapabilities, settings);
     const adapterAdded = augmentedModels.filter((m) => !comboModels.includes(m));
 
+    // Per-request exhaustion sets shared across every combo leg (panel, judge,
+    // fallback targets) so one bad connection does not get retried within the
+    // same request.
+    const exhaustionSets = {
+      exhaustedProviders: new Set(),
+      exhaustedConnections: new Set(),
+      transientRateLimitedProviders: new Set()
+    };
+
     if (comboStrategy === "fusion") {
       log.info("CHAT", `Combo "${modelStr}" with ${comboModels.length} models (strategy: fusion)`);
       return handleFusionChat({
         body,
         models: comboModels,
-        handleSingleModel: (b, m, isPanel) => {
+        handleSingleModel: (b, m, isPanel, targetOptions) => {
           let cleanRawReq = clientRawRequest;
           if (isPanel && clientRawRequest) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey);
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, targetOptions?.signal ?? null);
         },
         log,
         comboName: modelStr,
@@ -133,17 +142,12 @@ export async function handleChat(request, clientRawRequest = null) {
     }
 
     const comboStickyLimit = settings.comboStickyRoundRobinLimit;
-    const exhaustionSets = {
-      exhaustedProviders: new Set(),
-      exhaustedConnections: new Set(),
-      transientRateLimitedProviders: new Set()
-    };
     log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
     return handleComboChat({
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets),
+        (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null),
         adapterAdded
       ),
       log,
@@ -160,12 +164,17 @@ export async function handleChat(request, clientRawRequest = null) {
   const soloAugmented = augmentModelsWithCapacityAdapter([modelStr], requiredCapabilities, settings);
   if (soloAugmented.length > 1) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
+    const exhaustionSets = {
+      exhaustedProviders: new Set(),
+      exhaustedConnections: new Set(),
+      transientRateLimitedProviders: new Set()
+    };
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
     return handleComboChat({
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey),
+        (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null),
         adapterAdded
       ),
       log,
@@ -181,7 +190,7 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, exhaustionSets = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, exhaustionSets = null, externalSignal = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -208,7 +217,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets);
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, null);
           },
           log,
           comboName: modelStr,
@@ -223,7 +232,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets),
+          (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null),
           adapterAdded
         ),
         log,
@@ -252,6 +261,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     exhaustedConnections: new Set(),
     transientRateLimitedProviders: new Set()
   };
+
+  // Combine the client-request signal and the combo's per-target timeout
+  // signal so both abort the fallback loop and release the semaphore.
+  const signals = [request?.signal, externalSignal].filter(Boolean);
+  const effectiveSignal = signals.length > 1 ? AbortSignal.any(signals) : signals[0] || null;
 
   // Try with available accounts (fallback on errors)
   const excludeConnectionIds = new Set();
@@ -284,11 +298,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   while (true) {
-    // Abort check: stop trying accounts if the client already disconnected.
-    // Prevents wasted upstream calls and circuit-breaker probe hits on a dead
-    // connection.
-    if (request?.signal?.aborted) {
-      log.info("CHAT", `[${provider}/${model}] client disconnected — aborting fallback loop`);
+    // Abort check: stop trying accounts if the client already disconnected or
+    // the combo target timed out. Prevents wasted upstream calls and
+    // circuit-breaker probe hits on a dead connection.
+    if (effectiveSignal?.aborted) {
+      log.info("CHAT", `[${provider}/${model}] aborted — stopping fallback loop (client=${Boolean(request?.signal?.aborted)} target-timeout=${Boolean(externalSignal?.aborted)})`);
       return new Response(null, { status: 499 });
     }
 
@@ -316,7 +330,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
           const waitDecision = await maybeWaitForCooldown({
             retryAfter: credentials.retryAfter,
             retriesSoFar: cooldownRetries,
-            signal: request?.signal,
+            signal: effectiveSignal,
           });
           if (waitDecision.shouldRetry) {
             cooldownRetries++;
@@ -374,11 +388,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         semaphoreRelease = await acquireAccountSemaphore(semaphoreKey, {
           maxConcurrency: semaphoreMax,
           timeoutMs: 30_000,
-          signal: request?.signal ?? null,
+          signal: effectiveSignal,
         });
       } catch (e) {
-        if (request?.signal?.aborted) {
-          log.info("CHAT", `[${provider}/${model}] client disconnected while waiting for account semaphore — aborting`);
+        if (effectiveSignal?.aborted) {
+          log.info("CHAT", `[${provider}/${model}] aborted while waiting for account semaphore — stopping`);
           return new Response(null, { status: 499 });
         }
         if (isSemaphoreCapacityError(e)) {
@@ -429,7 +443,8 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       onRequestSuccess: async () => {
         await clearAccountError(credentials.connectionId, credentials, model);
         clearProviderFailure(provider);
-      }
+      },
+      externalSignal
     });
     } finally {
       // Always release the semaphore slot, even if handleChatCore throws
@@ -437,6 +452,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     }
 
     if (result.success) return result.response;
+
+    // If the combo target timed out or the client aborted, do NOT mark the
+    // account unavailable — the failure was local, not the provider's fault.
+    if (externalSignal?.aborted || request?.signal?.aborted) {
+      log.info("CHAT", `[${provider}/${model}] aborted after upstream attempt — not marking account`);
+      return new Response(null, { status: 499 });
+    }
 
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
