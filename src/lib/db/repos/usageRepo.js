@@ -960,6 +960,14 @@ export async function getUsageAnalytics(period = "7d") {
       totalTokens: (day.promptTokens || 0) + (day.completionTokens || 0),
       cost: day.cost || 0,
     });
+    // usageDaily counters are camelCase (promptTokens) — tokensFromRow reads
+    // snake_case token payloads, so map explicitly to avoid zeroed breakdowns.
+    const tokensFromDayValues = (values = {}) => {
+      const promptTokens = values.promptTokens || 0;
+      const completionTokens = values.completionTokens || 0;
+      const cachedTokens = values.cachedTokens || 0;
+      return { promptTokens, completionTokens, cachedTokens, totalTokens: promptTokens + completionTokens };
+    };
 
     for (const dayRow of dayRows) {
       const idx = bucketIndexByKey[dayRow.dateKey];
@@ -979,14 +987,14 @@ export async function getUsageAnalytics(period = "7d") {
       summary.cost += tokenInfo.cost;
 
       for (const [provider, values] of Object.entries(day.byProvider || {})) {
-        const tokenInfoP = tokensFromRow({ tokens: values });
+        const tokenInfoP = tokensFromDayValues(values);
         bumpAnalyticsMap(providerMap, provider, { ...tokenInfoP, cost: values.cost || 0, error: false, meta: { provider } });
       }
 
       for (const [modelKey, values] of Object.entries(day.byModel || {})) {
         const rawModel = values.rawModel || String(modelKey).split("|")[0] || "unknown";
         const provider = values.provider || String(modelKey).split("|")[1] || "unknown";
-        const tokenInfoM = tokensFromRow({ tokens: values });
+        const tokenInfoM = tokensFromDayValues(values);
         bumpAnalyticsMap(modelMap, `${rawModel}|${provider}`, {
           ...tokenInfoM,
           cost: values.cost || 0,
@@ -998,7 +1006,7 @@ export async function getUsageAnalytics(period = "7d") {
       for (const [connectionId, values] of Object.entries(day.byAccount || {})) {
         const conn = connectionMap[connectionId];
         const provider = conn?.provider || values.provider || "unknown";
-        const tokenInfoC = tokensFromRow({ tokens: values });
+        const tokenInfoC = tokensFromDayValues(values);
         bumpAnalyticsMap(connectionAgg, connectionId, {
           ...tokenInfoC,
           cost: values.cost || 0,
