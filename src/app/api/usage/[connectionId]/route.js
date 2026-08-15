@@ -6,6 +6,7 @@ import { getUsageForProvider } from "open-sse/services/usage.js";
 import { getExecutor } from "open-sse/executors/index.js";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { USAGE_APIKEY_PROVIDERS } from "@/shared/constants/providers";
+import { getMonitorUsage, recordMonitorResult } from "@/sse/services/quotaMonitor.js";
 
 // Detect auth-expired messages returned by usage providers instead of throwing
 const AUTH_EXPIRED_PATTERNS = ["expired", "authentication", "unauthorized", "401", "re-authorize"];
@@ -145,6 +146,16 @@ export async function GET(request, { params }) {
       return Response.json({ message: "Usage not available for this connection" });
     }
 
+    // Non-force requests are served from the background quota monitor's
+    // latest check — client auto-refresh costs nothing upstream. Falls back
+    // to a live fetch when the monitor has not checked this connection yet.
+    if (!force) {
+      const monitored = getMonitorUsage(connectionId);
+      if (monitored) {
+        return Response.json(monitored);
+      }
+    }
+
     // Resolve connection proxy config; force strictProxy=false so quota/refresh fall back to direct on failure
     const proxyConfig = await resolveConnectionProxyConfig(connection.providerSpecificData);
     const proxyOptions = {
@@ -182,6 +193,10 @@ export async function GET(request, { params }) {
         console.warn(`[Usage] ${connection.provider}: force refresh failed: ${retryError.message}`);
       }
     }
+
+    // Feed the live result back into the background monitor so dashboard
+    // non-force reads and the monitor schedule stay in sync.
+    recordMonitorResult(connectionId, connection.provider, usage);
 
     return Response.json(usage);
   } catch (error) {

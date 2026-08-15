@@ -103,6 +103,21 @@ function isCodex(provider) {
 }
 
 /**
+ * Sync query for other services (e.g. quota monitor): is this connection
+ * currently hard-disabled by the Codex quota guard (within its 24h window)?
+ */
+export function isAccountGuardDisabled(connectionId, provider = "codex") {
+  if (!connectionId || !isCodex(provider) || !statePath) return false;
+  try {
+    const item = readState().accounts?.[connectionId];
+    if (item?.disabled !== true || !item.nextCheckAt) return false;
+    return Date.parse(item.nextCheckAt) > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Called from markAccountUnavailable() on upstream errors. Codex + HTTP 429
  * means the account's usage limit is exhausted — deactivate it in the DB so
  * account selection skips it entirely until the re-enable window.

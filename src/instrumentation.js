@@ -4,5 +4,7 @@ export async function register() {
     initConsoleLogCapture();
     const { startCodexQuotaGuard } = await import("@/sse/services/codexQuotaGuard.js");
     startCodexQuotaGuard();
+    const { startQuotaMonitor } = await import("@/sse/services/quotaMonitor.js");
+    startQuotaMonitor();
   }
 }
