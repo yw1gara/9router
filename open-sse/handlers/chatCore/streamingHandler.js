@@ -41,8 +41,78 @@ function buildTransformStream({ provider, sourceFormat, targetFormat, userAgent,
 }
 
 /**
+ * Probe the upstream body's first chunk BEFORE committing to a 200 SSE
+ * response. An upstream that closes the stream without sending a single byte
+ * would otherwise produce a "successful" empty completion — the client can't
+ * distinguish it from a real API error, so it neither retries nor surfaces an
+ * error (observed as ZCode turns dying mid-task on empty SSE streams).
+ *
+ * The probe races the provider's stall timeout — the same byte-silence budget
+ * pipeWithDisconnect's watchdog uses. An upstream that produces no first byte
+ * within the window is a stall (identical to the old watchdog behavior), now
+ * converted into a FAILED target so the fallback chain retries invisibly.
+ *
+ * Returns:
+ *   { empty: true, stalled? }  — zero-byte close, first-read failure, or stall.
+ *   { empty: false, response } — Response whose pull-based body replays the
+ *                                probed chunk + the rest of the stream.
+ */
+async function probeUpstreamStream(providerResponse, stallTimeoutMs) {
+  const body = providerResponse?.body;
+  if (!body) return { empty: true };
+
+  const reader = body.getReader();
+  let first;
+  try {
+    first = await Promise.race([
+      reader.read(),
+      new Promise((_, reject) => {
+        const t = setTimeout(() => reject(new Error("probe-stall")), stallTimeoutMs);
+        if (typeof t.unref === "function") t.unref();
+      }),
+    ]);
+  } catch (err) {
+    reader.cancel().catch(() => {});
+    return { empty: true, stalled: err?.message === "probe-stall" };
+  }
+
+  if (first && first.done) return { empty: true };
+
+  return {
+    empty: false,
+    response: new Response(makeReplayStream(reader, first), {
+      status: providerResponse.status,
+      headers: providerResponse.headers,
+    }),
+  };
+}
+
+/**
+ * Pull-based replay of a probed reader: one chunk per pull, so downstream
+ * backpressure propagates to the upstream read loop instead of buffering the
+ * whole response in memory. The already-read first result is seeded first.
+ */
+function makeReplayStream(reader, firstResult) {
+  let pending = firstResult;
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const r = pending || await reader.read();
+        pending = null;
+        if (r.done) controller.close();
+        else controller.enqueue(r.value);
+      } catch (e) {
+        controller.error(e);
+      }
+    },
+    cancel(reason) { reader.cancel(reason).catch(() => {}); },
+  });
+}
+
+/**
  * Handle streaming response — pipe provider SSE through transform stream to client.
  */
+export { probeUpstreamStream };
 export async function handleStreamingResponse({ providerResponse, provider, model, sourceFormat, targetFormat, userAgent, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, toolNameMap, customToolNames, streamController, onStreamComplete, streamDetailId, pxpipe, reqTag, log }) {
   // When upstream returns HTML/text instead of SSE (e.g. Cloudflare 5xx error
   // page), piping it through the SSE transform stream causes Next.js
@@ -64,12 +134,39 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
     streamController?.handleError?.(new Error(`upstream non-SSE: ${status}`));
     return {
       success: false,
+      status,
+      error: `[${status}]: ${shortMsg}`,
       response: new Response(JSON.stringify({ error: { message: `[${status}]: ${shortMsg}` } }), {
         status,
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
       }),
     };
   }
+
+  // Empty-stream guard: probe the first upstream byte before committing to a
+  // 200 SSE response. A zero-byte upstream close becomes a FAILED target so
+  // the account-fallback / combo chain retries invisibly instead of the client
+  // receiving a "successful" empty stream.
+  const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
+  const probe = await probeUpstreamStream(providerResponse, stallTimeoutMs);
+  if (probe.empty) {
+    const msg = probe.stalled
+      ? `Upstream stalled before sending any data (${provider}/${model})`
+      : `Upstream closed the stream without sending any data (${provider}/${model})`;
+    if (log?.errorLine) log.errorLine(reqTag, "✗", `${probe.stalled ? "STREAM STALL" : "EMPTY STREAM"} · ${provider}/${model}`);
+    else console.warn(`[STREAM] ${provider} | ${model} | ${probe.stalled ? "stalled" : "empty"} upstream stream`);
+    streamController?.handleError?.(new Error(probe.stalled ? "stream stalled before first byte" : "upstream empty stream"));
+    return {
+      success: false,
+      status: 502,
+      error: msg,
+      response: new Response(JSON.stringify({ error: { message: msg } }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
+      }),
+    };
+  }
+  const probedResponse = probe.response;
 
   // Only now that the upstream response is accepted as a real SSE/JSON stream
   // do we clear account error state and provider breaker failure history.
@@ -86,8 +183,7 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   // Responses passthrough: synthesize response.failed + [DONE] if the stream aborts/stalls before a terminal event
   const isResponsesPassthrough = sourceFormat === FORMATS.OPENAI_RESPONSES && targetFormat === FORMATS.OPENAI_RESPONSES;
   const onAbortTerminal = isResponsesPassthrough ? buildAbortedResponsesTerminalBytes : null;
-  const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
-  const transformedBody = pipeWithDisconnect(providerResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
+  const transformedBody = pipeWithDisconnect(probedResponse, transformStream, streamController, onAbortTerminal, stallTimeoutMs);
 
   saveRequestDetail(buildRequestDetail({
     provider, model, connectionId,
