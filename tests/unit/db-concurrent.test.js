@@ -28,9 +28,12 @@ describe("DB Concurrency — atomic safety", () => {
     const N = 100;
     const promises = [];
     for (let i = 0; i < N; i++) {
+      // Unique timestamp + token count per entry: saveRequestUsage
+      // intentionally dedupes identical (timestamp, tokens) rows.
       promises.push(db.saveRequestUsage({
         provider: "openai", model: "gpt-4", connectionId: "c1",
-        tokens: { prompt_tokens: 10, completion_tokens: 5 },
+        timestamp: new Date(Date.now() + i).toISOString(),
+        tokens: { prompt_tokens: 10, completion_tokens: 5 + i },
         endpoint: "/v1/chat", status: "ok",
       }));
     }
@@ -71,7 +74,8 @@ describe("DB Concurrency — atomic safety", () => {
     for (let i = 0; i < 50; i++) {
       ops.push(db.saveRequestUsage({
         provider: "anthropic", model: `m-${i % 3}`, connectionId: "c2",
-        tokens: { prompt_tokens: 20 }, status: "ok",
+        timestamp: new Date(Date.now() + i).toISOString(),
+        tokens: { prompt_tokens: 20, completion_tokens: i }, status: "ok",
       }));
       ops.push(db.setModelAlias(`a-${i}`, `target-${i}`));
       ops.push(db.disableModels("openai", [`d-${i}`]));
@@ -153,9 +157,12 @@ describe("DB Concurrency — atomic safety", () => {
     const N = 50;
     const promises = [];
     for (let i = 0; i < N; i++) {
+      // Unique timestamp + tokens: saveRequestUsage intentionally dedupes
+      // identical (timestamp, tokens) rows written in the same millisecond.
       promises.push(db.saveRequestUsage({
         provider: "google", model: "gemini-pro", connectionId: "cG",
-        tokens: { prompt_tokens: 100, completion_tokens: 50 },
+        timestamp: new Date(Date.now() + i).toISOString(),
+        tokens: { prompt_tokens: 100, completion_tokens: 50 + i },
         status: "ok",
       }));
     }
@@ -166,6 +173,6 @@ describe("DB Concurrency — atomic safety", () => {
     expect(g).toBeDefined();
     expect(g.requests).toBe(N);
     expect(g.promptTokens).toBe(N * 100);
-    expect(g.completionTokens).toBe(N * 50);
+    expect(g.completionTokens).toBe(50 * N + (N * (N - 1)) / 2); // 50+51+...+(50+N-1)
   });
 });

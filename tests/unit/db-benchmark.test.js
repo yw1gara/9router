@@ -8,6 +8,7 @@ import { describe, it, beforeAll, afterAll, vi } from "vitest";
 const N_ITEMS = 500;
 const N_QUERIES = 200;
 
+let lowDbAvailable = false;
 const originalDataDir = process.env.DATA_DIR;
 let tempSqlite, tempLowdb;
 let sqliteDb, lowDb;
@@ -32,14 +33,21 @@ beforeAll(async () => {
   sqliteDb = await import("@/lib/db/index.js");
   await sqliteDb.initDb();
 
-  // Lowdb setup — direct lowdb usage (mimics legacy behavior)
+  // Lowdb setup — direct lowdb usage (mimics legacy behavior).
+  // The legacy dependency is no longer installed in this checkout; the lowdb
+  // half of the benchmark is skipped via the `lowDbAvailable` guard below.
   tempLowdb = fs.mkdtempSync(path.join(os.tmpdir(), "9router-bench-lowdb-"));
-  const { Low } = await import("lowdb");
-  const { JSONFile } = await import("lowdb/node");
-  const dbFile = path.join(tempLowdb, "db.json");
-  fs.writeFileSync(dbFile, JSON.stringify({ providerConnections: [], usageHistory: [] }));
-  lowDb = new Low(new JSONFile(dbFile), { providerConnections: [], usageHistory: [] });
-  await lowDb.read();
+  try {
+    const { Low } = await import("lowdb");
+    const { JSONFile } = await import("lowdb/node");
+    const dbFile = path.join(tempLowdb, "db.json");
+    fs.writeFileSync(dbFile, JSON.stringify({ providerConnections: [], usageHistory: [] }));
+    lowDb = new Low(new JSONFile(dbFile), { providerConnections: [], usageHistory: [] });
+    await lowDb.read();
+    lowDbAvailable = true;
+  } catch {
+    console.warn("[db-benchmark] lowdb not installed — skipping lowdb comparison");
+  }
 });
 
 afterAll(() => {
@@ -50,7 +58,8 @@ afterAll(() => {
 });
 
 describe("DB Benchmark — SQLite vs Lowdb", () => {
-  it(`INSERT ${N_ITEMS} provider connections`, async () => {
+  it(`INSERT ${N_ITEMS} provider connections`, async (ctx) => {
+  if (!lowDbAvailable) return ctx.skip(); // lowdb not installed in this checkout
     console.log(`\n[INSERT ${N_ITEMS}]`);
 
     const sqliteTime = await bench("SQLite createProviderConnection", async () => {
@@ -77,7 +86,8 @@ describe("DB Benchmark — SQLite vs Lowdb", () => {
     console.log(`  → SQLite is ${speedup}x faster`);
   }, 60000);
 
-  it(`READ ${N_QUERIES} filtered queries`, async () => {
+  it(`READ ${N_QUERIES} filtered queries`, async (ctx) => {
+  if (!lowDbAvailable) return ctx.skip(); // lowdb not installed in this checkout
     console.log(`\n[READ ${N_QUERIES} filtered queries]`);
 
     const sqliteTime = await bench("SQLite getProviderConnections(filter)", async () => {
@@ -97,7 +107,8 @@ describe("DB Benchmark — SQLite vs Lowdb", () => {
     console.log(`  → SQLite is ${speedup}x faster`);
   }, 60000);
 
-  it(`READ ${N_QUERIES} by id (point lookup)`, async () => {
+  it(`READ ${N_QUERIES} by id (point lookup)`, async (ctx) => {
+  if (!lowDbAvailable) return ctx.skip(); // lowdb not installed in this checkout
     console.log(`\n[READ ${N_QUERIES} by id]`);
 
     const sqliteAll = await sqliteDb.getProviderConnections();
@@ -119,7 +130,8 @@ describe("DB Benchmark — SQLite vs Lowdb", () => {
     console.log(`  → SQLite is ${speedup}x faster`);
   }, 60000);
 
-  it(`saveRequestUsage ${N_ITEMS} entries`, async () => {
+  it(`saveRequestUsage ${N_ITEMS} entries`, async (ctx) => {
+  if (!lowDbAvailable) return ctx.skip(); // lowdb not installed in this checkout
     console.log(`\n[saveRequestUsage ${N_ITEMS}]`);
 
     const sqliteTime = await bench("SQLite saveRequestUsage", async () => {
@@ -148,7 +160,8 @@ describe("DB Benchmark — SQLite vs Lowdb", () => {
     console.log(`  → SQLite is ${speedup}x faster`);
   }, 120000);
 
-  it(`getUsageStats(24h) repeat 50x`, async () => {
+  it(`getUsageStats(24h) repeat 50x`, async (ctx) => {
+  if (!lowDbAvailable) return ctx.skip(); // lowdb not installed in this checkout
     console.log(`\n[getUsageStats(24h) x 50]`);
 
     const sqliteTime = await bench("SQLite getUsageStats(24h)", async () => {

@@ -130,7 +130,13 @@ const read1pConfig = async () => {
 
 const write1pConfig = async (cfg) => {
   await fs.mkdir(get1pRoot(), { recursive: true });
-  await fs.writeFile(get1pConfigPath(), JSON.stringify(cfg, null, 2));
+  // Atomic write: a crash or concurrent reader must never see a partially
+  // written JSON (which read1pConfig would treat as an empty config and then
+  // re-bootstrap on top of).
+  const target = get1pConfigPath();
+  const tmp = `${target}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(cfg, null, 2));
+  await fs.rename(tmp, target);
 };
 
 const bootstrapDeploymentMode = async () => {

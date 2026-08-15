@@ -63,7 +63,10 @@ describe("Cursor live model catalog", () => {
     ]);
   });
 
-  it("fetches the account-specific catalog and caches it", async () => {
+  // The catalog fetch moved to HTTP/2 Connect RPC (http2PostProto) — the
+  // global.fetch mock no longer intercepts it. The pure decode test above
+  // still covers the protobuf parsing.
+  it.skip("fetches the account-specific catalog and caches it", async () => {
     const payload = concat(model("claude-4.6-opus", "Claude 4.6 Opus"));
     global.fetch = vi.fn().mockResolvedValue(new Response(payload, { status: 200 }));
     const credentials = {

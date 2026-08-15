@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("open-sse/index.js", () => ({}), { virtual: true });
 
@@ -107,7 +107,11 @@ describe("quota auto-ping", () => {
       execute: vi.fn().mockResolvedValue({ response: { ok: true, text: codexResponseText } }),
     });
     state = { running: false, resetCache: {}, failureCache: {} };
+    vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+  });
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("does not ping Codex when setting is absent", async () => {
