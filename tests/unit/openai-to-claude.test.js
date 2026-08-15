@@ -193,8 +193,16 @@ describe("openaiToClaudeResponse", () => {
       }]
     };
 
+    // Arguments are buffered and sanitized at finish (fix for #1144 retry
+    // loops) — feed a finish chunk to flush the input_json_delta.
     const result = openaiToClaudeResponse(chunk, state);
-    const inputDelta = result.find(event => event.delta?.type === "input_json_delta");
+    const finish = openaiToClaudeResponse({
+      id: "chatcmpl-test",
+      model: "gpt-test",
+      choices: [{ delta: {}, finish_reason: "tool_calls" }],
+    }, state);
+    const events = [...result, ...finish];
+    const inputDelta = events.find(event => event.delta?.type === "input_json_delta");
 
     expect(inputDelta).toBeDefined();
     expect(JSON.parse(inputDelta.delta.partial_json)).toEqual({

@@ -53,7 +53,16 @@ export function filterToOpenAIFormat(body, opts = {}) {
       if (filteredContent.length === 0) {
         filteredContent.push({ type: OPENAI_BLOCK.TEXT, text: "" });
       }
-      
+
+      // Text-only payloads flatten back to a plain string — the strictest
+      // OpenAI-compatible providers (string-safe guarantee) reject typed
+      // block arrays when no other modality is present. Blocks carrying
+      // cache_control must stay typed (alicode/DashScope #2069).
+      if (filteredContent.every(b => b.type === OPENAI_BLOCK.TEXT) &&
+          !filteredContent.some(b => b.cache_control)) {
+        return { ...msg, content: filteredContent.map(b => b.text || "").join("\n") };
+      }
+
       return { ...msg, content: filteredContent };
     }
     
