@@ -211,13 +211,15 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         return handleFusionChat({
           body,
           models: comboModels,
-          handleSingleModel: (b, m, isPanel) => {
+          handleSingleModel: (b, m, isPanel, targetOptions) => {
             let cleanRawReq = clientRawRequest;
             if (isPanel && clientRawRequest) {
               const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
               cleanRawReq = { ...clientRawRequest, body: cleanBody };
             }
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, null);
+            // Forward the panel abort signal — otherwise fusion timeout /
+            // straggler aborts never reach the executor fetch.
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, targetOptions?.signal ?? null);
           },
           log,
           comboName: modelStr,

@@ -131,13 +131,37 @@ function getRefreshLockKey(provider, credentials) {
   return `${provider}:${stableId}`;
 }
 
-export async function withCredentialRefreshLock(provider, credentials, refreshFn) {
+export async function withCredentialRefreshLock(provider, credentials, refreshFn, getCurrentCredentials) {
   const key = getRefreshLockKey(provider, credentials);
   const existing = refreshLocks.get(key);
   if (existing) return existing;
 
   const pending = Promise.resolve()
-    .then(refreshFn)
+    .then(async () => {
+      // Re-check under the lock: a concurrent caller may have refreshed and
+      // persisted rotated tokens between our snapshot and lock acquisition.
+      // Refreshing again with the consumed (rotating) refresh token would
+      // yield invalid_grant and can mark a healthy connection as auth_failed.
+      if (getCurrentCredentials) {
+        try {
+          const latest = await getCurrentCredentials();
+          if (latest && !shouldRefreshCredentials(provider, latest)) {
+            const pick = {
+              accessToken: latest.accessToken,
+              apiKey: latest.apiKey,
+              refreshToken: latest.refreshToken,
+              copilotToken: latest.copilotToken ?? latest.providerSpecificData?.copilotToken,
+              expiresAt: latest.expiresAt,
+              lastRefreshAt: latest.lastRefreshAt ?? latest.providerSpecificData?.lastRefreshAt,
+            };
+            if (pick.accessToken || pick.apiKey || pick.copilotToken || pick.refreshToken) {
+              return pick;
+            }
+          }
+        } catch { /* read failed — fall through to a real refresh */ }
+      }
+      return refreshFn();
+    })
     .finally(() => {
       refreshLocks.delete(key);
     });
@@ -146,11 +170,11 @@ export async function withCredentialRefreshLock(provider, credentials, refreshFn
   return pending;
 }
 
-export async function refreshProviderCredentials(provider, credentials, log) {
+export async function refreshProviderCredentials(provider, credentials, log, getCurrentCredentials) {
   if (!credentials) return null;
 
   return withCredentialRefreshLock(provider, credentials, async () => {
     const refreshed = await refreshTokenByProvider(provider, credentials, log);
     return mergeRefreshedCredentials(provider, credentials, refreshed);
-  });
+  }, getCurrentCredentials);
 }

@@ -400,6 +400,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
         try {
           const retryResult = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
           if (retryResult.response.ok) {
+            // Release the original 401/403 body — an unconsumed body pins the
+            // pooled socket until GC and can starve the connection pool.
+            if (providerResponse.body) providerResponse.body.cancel().catch(() => {});
             providerResponse = retryResult.response;
             providerUrl = retryResult.url;
             providerResponseFormat = retryResult.responseFormat || targetFormat;

@@ -80,7 +80,10 @@ async function withStateLock(fn) {
         continue;
       }
       if (Date.now() - started > 10000) throw new Error("quota state lock timeout");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+      // Async sleep, NOT Atomics.wait: the lock holder awaits DB I/O inside the
+      // lock, and a synchronous wait would freeze the event loop so the holder
+      // can never finish — deadlocking the whole server until the 10s timeout.
+      await new Promise((r) => setTimeout(r, 25));
     }
   }
   try {

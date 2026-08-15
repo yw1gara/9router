@@ -247,7 +247,11 @@ async function writeSkipApprovals(managedServers) {
   }
   cfg.operonSkipMcpApprovals = skip;
   await fs.mkdir(getWriteRoot(), { recursive: true });
-  await fs.writeFile(cfgPath, JSON.stringify(cfg, null, 2));
+  // Atomic write — same rationale as write1pConfig: a truncated JSON makes the
+  // GET route report Cowork as unconfigured while meta still points here.
+  const cfgTmp = `${cfgPath}.${process.pid}.tmp`;
+  await fs.writeFile(cfgTmp, JSON.stringify(cfg, null, 2));
+  await fs.rename(cfgTmp, cfgPath);
   return { written: Object.keys(skip).length };
 }
 
@@ -353,7 +357,10 @@ export async function POST(request) {
     };
     if (managedMcpServers.length > 0) newConfig.managedMcpServers = managedMcpServers;
 
-    await fs.writeFile(configPath, JSON.stringify(newConfig, null, 2));
+    await fs.mkdir(getWriteConfigDir(), { recursive: true });
+    const cfgTmp = `${configPath}.${process.pid}.tmp`;
+    await fs.writeFile(cfgTmp, JSON.stringify(newConfig, null, 2));
+    await fs.rename(cfgTmp, configPath);
 
     let skipResult = null;
     try { skipResult = await writeSkipApprovals(managedMcpServers); } catch (e) { skipResult = { error: e.message }; }

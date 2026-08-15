@@ -202,7 +202,9 @@ async function runCheck(deps, connection) {
 
     const isActive = current.isActive ?? true;
     const marked = Boolean(current.providerSpecificData?.autoQuotaDisabled);
-    const guardDisabled = deps.isCodexGuardDisabled ? deps.isCodexGuardDisabled(current.id, current.provider) : false;
+    // Lazy deps resolve to async wrappers — always await so a pending Promise
+    // is never treated as truthy (which would dead-code both toggle branches).
+    const guardDisabled = deps.isCodexGuardDisabled ? await deps.isCodexGuardDisabled(current.id, current.provider) : false;
 
     if (depleted && isActive && !guardDisabled) {
       await deps.updateProviderConnection(current.id, {

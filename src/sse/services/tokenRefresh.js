@@ -1,6 +1,6 @@
 // Re-export from open-sse with local logger
 import * as log from "../utils/logger.js";
-import { updateProviderConnection } from "../../lib/localDb.js";
+import { updateProviderConnection, getProviderConnectionById } from "../../lib/localDb.js";
 import {
   getProjectIdForConnection,
   invalidateProjectId,
@@ -237,7 +237,13 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
       lastRefreshAt: creds.lastRefreshAt || null,
     });
 
-    const newCreds = await _refreshProviderCredentials(provider, creds, log);
+    // getCurrentCredentials: lets the refresh lock re-read the persisted row
+    // after acquisition, so a concurrent refresh's rotated tokens are reused
+    // instead of refreshing again with this (possibly consumed) snapshot.
+    const getCurrentCredentials = creds.connectionId
+      ? async () => getProviderConnectionById(creds.connectionId)
+      : null;
+    const newCreds = await _refreshProviderCredentials(provider, creds, log, getCurrentCredentials);
     if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,

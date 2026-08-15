@@ -799,7 +799,9 @@ function bumpAnalyticsMap(map, key, values = {}) {
     };
   }
   const item = map[key];
-  item.requests += 1;
+  // Daily-summary callers pass the day's true request count; raw-row callers
+  // invoke this once per request and pass no aggregate (defaults to 1).
+  item.requests += values.requests ?? 1;
   item.promptTokens += values.promptTokens || 0;
   item.completionTokens += values.completionTokens || 0;
   item.cachedTokens += values.cachedTokens || 0;
@@ -988,7 +990,7 @@ export async function getUsageAnalytics(period = "7d") {
 
       for (const [provider, values] of Object.entries(day.byProvider || {})) {
         const tokenInfoP = tokensFromDayValues(values);
-        bumpAnalyticsMap(providerMap, provider, { ...tokenInfoP, cost: values.cost || 0, error: false, meta: { provider } });
+        bumpAnalyticsMap(providerMap, provider, { ...tokenInfoP, requests: values.requests, cost: values.cost || 0, error: false, meta: { provider } });
       }
 
       for (const [modelKey, values] of Object.entries(day.byModel || {})) {
@@ -997,6 +999,7 @@ export async function getUsageAnalytics(period = "7d") {
         const tokenInfoM = tokensFromDayValues(values);
         bumpAnalyticsMap(modelMap, `${rawModel}|${provider}`, {
           ...tokenInfoM,
+          requests: values.requests,
           cost: values.cost || 0,
           error: false,
           meta: { model: rawModel, provider },
@@ -1009,6 +1012,7 @@ export async function getUsageAnalytics(period = "7d") {
         const tokenInfoC = tokensFromDayValues(values);
         bumpAnalyticsMap(connectionAgg, connectionId, {
           ...tokenInfoC,
+          requests: values.requests,
           cost: values.cost || 0,
           error: false,
           meta: {
