@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import Card from "@/shared/components/Card";
 import Button from "@/shared/components/Button";
 import Drawer from "@/shared/components/Drawer";
@@ -117,6 +117,7 @@ export default function RequestDetailsTab() {
     startDate: "",
     endDate: ""
   });
+  const requestSeq = useRef(0);
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -132,6 +133,7 @@ export default function RequestDetailsTab() {
   }, []);
 
   const fetchDetails = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       const params = new URLSearchParams({
@@ -145,12 +147,13 @@ export default function RequestDetailsTab() {
       const res = await fetch(`/api/usage/request-details?${params}`);
       const data = await res.json();
 
+      if (seq !== requestSeq.current) return;
       setDetails(data.details || []);
       setPagination(prev => ({ ...prev, ...data.pagination }));
     } catch (error) {
       console.error("Failed to fetch request details:", error);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [pagination.page, pagination.pageSize, filters]);
 

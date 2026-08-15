@@ -3,18 +3,18 @@
  * (usage limit reached) and re-enables them 24h later.
  *
  * State file: $DATA_DIR/state/codex-account-state/disabled.json
- * DB updates go through the sqlite3 CLI to stay independent of the bundled
- * sqlite driver (works in CLI standalone builds where native modules are lazy).
+ * DB updates go through the app DB driver (getAdapter) so every adapter
+ * (better-sqlite3 / node:sqlite / bun / sql.js) sees the same write.
  *
  * Ported from the live patch that was injected into the published npm build
  * (app/.next-cli-build/server/chunks/4664.js) so the behaviour survives in
  * source form.
  */
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { resolveProviderId } from "@/shared/constants/providers.js";
+import { getAdapter } from "@/lib/db/driver.js";
 
 const statePath = (() => {
   try {
@@ -26,13 +26,16 @@ const statePath = (() => {
   }
 })();
 
-const dbPath = (() => {
-  try {
-    return path.join(process.env.DATA_DIR || path.join(os.homedir(), ".9router"), "db", "data.sqlite");
-  } catch {
-    return null;
-  }
-})();
+async function dbGet(sqlText, params = []) {
+  const adapter = await getAdapter();
+  return adapter.get(sqlText, params);
+}
+
+async function dbRun(sqlText, params = []) {
+  const adapter = await getAdapter();
+  return adapter.run(sqlText, params);
+}
+
 
 function readState() {
   if (!statePath) return { accounts: {} };
@@ -55,7 +58,7 @@ function writeState(state) {
 // the finally) is detected by age and broken instead of wedging every future
 // guard call behind a 10s event-loop stall.
 const STALE_LOCK_MS = 15000;
-function withStateLock(fn) {
+async function withStateLock(fn) {
   if (!statePath) return fn();
   const lock = `${statePath}.lock`;
   const started = Date.now();
@@ -81,28 +84,24 @@ function withStateLock(fn) {
     }
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     fs.rmSync(lock, { recursive: true, force: true });
   }
 }
 
-function sql(sqlText) {
-  if (!dbPath) throw new Error("quota database unavailable");
-  return execFileSync("sqlite3", ["-json", dbPath, sqlText], { encoding: "utf8" });
+async function getConnectionRow(id) {
+  return dbGet(
+    "SELECT id, provider, email, isActive FROM providerConnections WHERE id = ?",
+    [id],
+  );
 }
 
-function getConnectionRow(id) {
-  const rows = JSON.parse(sql(
-    `SELECT id, provider, email, isActive FROM providerConnections WHERE id = '${String(id).replace(/'/g, "''")}';`
-  ) || "[]");
-  return rows[0] || null;
-}
-
-function setConnectionActive(id, isActive) {
-  const safe = String(id).replace(/'/g, "''");
-  const at = new Date().toISOString().replace(/'/g, "''");
-  sql(`BEGIN IMMEDIATE; UPDATE providerConnections SET isActive = ${isActive ? 1 : 0}, updatedAt = '${at}' WHERE id = '${safe}' AND provider = 'codex'; COMMIT;`);
+async function setConnectionActive(id, isActive) {
+  await dbRun(
+    "UPDATE providerConnections SET isActive = ?, updatedAt = ? WHERE id = ? AND provider = 'codex'",
+    [isActive ? 1 : 0, new Date().toISOString(), id],
+  );
 }
 
 function isQuotaError(status) {
@@ -141,8 +140,8 @@ export async function disableCodexAccountOnQuota(connectionId, provider, status,
   if (!isCodex(provider) || !connectionId || !isQuotaError(status)) return;
   const now = Date.now();
   const iso = new Date(now).toISOString();
-  withStateLock(() => {
-    const row = getConnectionRow(connectionId);
+  await withStateLock(async () => {
+    const row = await getConnectionRow(connectionId);
     if (!row || row.provider !== "codex") return;
     const state = readState();
     const old = state.accounts?.[connectionId];
@@ -150,7 +149,7 @@ export async function disableCodexAccountOnQuota(connectionId, provider, status,
       console.warn(`[CODEX_QUOTA_GUARD] already disabled ${row.email || connectionId}`);
       return;
     }
-    setConnectionActive(connectionId, false);
+    await setConnectionActive(connectionId, false);
     state.accounts = state.accounts || {};
     state.accounts[connectionId] = {
       ...old,
@@ -169,14 +168,14 @@ export async function disableCodexAccountOnQuota(connectionId, provider, status,
 // On boot: make sure accounts marked disabled in the state file are also inactive in the DB
 async function reconcileDisabledAccounts() {
   if (!statePath) return;
-  withStateLock(() => {
+  await withStateLock(async () => {
     const state = readState();
     const now = Date.now();
     for (const [id, item] of Object.entries(state.accounts || {})) {
       if (item?.disabled !== true || (item.nextCheckAt && Date.parse(item.nextCheckAt) <= now)) continue;
-      const row = getConnectionRow(id);
+      const row = await getConnectionRow(id);
       if (!row || row.provider !== "codex" || Number(row.isActive) === 0) continue;
-      setConnectionActive(id, false);
+      await setConnectionActive(id, false);
       console.warn(`[CODEX_QUOTA_GUARD] reconciled inactive ${row.email || id}`);
     }
     writeState(state);
@@ -186,14 +185,14 @@ async function reconcileDisabledAccounts() {
 // Hourly: re-enable accounts whose 24h window has passed
 async function reenableExpiredAccounts() {
   if (!statePath) return;
-  withStateLock(() => {
+  await withStateLock(async () => {
     const state = readState();
     const now = Date.now();
     for (const [id, item] of Object.entries(state.accounts || {})) {
       if (item?.disabled !== true || !item.nextCheckAt || Date.parse(item.nextCheckAt) > now) continue;
-      const row = getConnectionRow(id);
+      const row = await getConnectionRow(id);
       if (!row || row.provider !== "codex") continue;
-      setConnectionActive(id, Number(item.previousIsActive) !== 0);
+      await setConnectionActive(id, Number(item.previousIsActive) !== 0);
       item.disabled = false;
       item.reenabledAt = new Date(now).toISOString();
       console.warn(`[CODEX_QUOTA_GUARD] re-enabled ${item.email || id}`);

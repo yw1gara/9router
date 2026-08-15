@@ -558,9 +558,12 @@ const FUSION_DEFAULTS = {
 };
 
 // Resolve a Response (or {__error}) within ms; the loser keeps running but is ignored.
-function withTimeout(promise, ms) {
+function withTimeout(promise, ms, controller = null) {
   return new Promise((resolve) => {
-    const t = setTimeout(() => resolve({ __timeout: true }), ms);
+    const t = setTimeout(() => {
+      controller?.abort(new Error("fusion panel timeout"));
+      resolve({ __timeout: true });
+    }, ms);
     Promise.resolve(promise)
       .then((v) => { clearTimeout(t); resolve(v); })
       .catch((e) => { clearTimeout(t); resolve({ __error: e }); });
@@ -574,7 +577,7 @@ function withTimeout(promise, ms) {
  * still preferring a full panel when everyone is fast. Bounded by a hard timeout.
  * Returns a sparse array aligned to `calls` (undefined = not yet / dropped).
  */
-function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs }) {
+function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs, onFinish } = {}) {
   return new Promise((resolve) => {
     const out = new Array(calls.length);
     let settled = 0;
@@ -586,6 +589,7 @@ function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs })
       finished = true;
       clearTimeout(hardTimer);
       if (graceTimer) clearTimeout(graceTimer);
+      try { onFinish?.(); } catch { /* ignore abort errors */ }
       resolve(out);
     };
     const hardTimer = setTimeout(finish, panelHardTimeoutMs);
@@ -660,8 +664,19 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   }
 
   const t0 = Date.now();
-  const calls = panel.map((m) => withTimeout(handleSingleModel(panelBody, m, true), cfg.panelHardTimeoutMs));
-  const settled = await collectPanel(calls, { ...cfg, minPanel });
+  const panelControllers = panel.map(() => new AbortController());
+  const calls = panel.map((m, i) =>
+    withTimeout(
+      handleSingleModel(panelBody, m, true, { signal: panelControllers[i].signal }),
+      cfg.panelHardTimeoutMs,
+      panelControllers[i],
+    ),
+  );
+  const settled = await collectPanel(calls, {
+    ...cfg,
+    minPanel,
+    onFinish: () => { for (const c of panelControllers) c.abort(); },
+  });
   log.info("FUSION", `fan-out collected in ${Date.now() - t0}ms`);
 
   // 2. Collect successful answers.

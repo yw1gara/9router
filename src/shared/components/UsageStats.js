@@ -216,6 +216,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
   const [periodLocal, setPeriodLocal] = useState("today");
   const isInitialLoad = useRef(true);
   const hasLoadedStats = useRef(false);
+  const requestSeq = useRef(0);
   const period = periodProp ?? periodLocal;
   const setPeriod = setPeriodProp ?? setPeriodLocal;
 
@@ -253,6 +254,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
   // Fetch filtered stats via REST when period changes
   useEffect(() => {
+    const seq = ++requestSeq.current;
     // First load: show full spinner; subsequent: show subtle fetching indicator
     if (isInitialLoad.current) {
       isInitialLoad.current = false;
@@ -264,6 +266,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
     fetch(`/api/usage/stats?period=${period}`)
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
+        if (seq !== requestSeq.current) return;
         if (data) {
           hasLoadedStats.current = true;
           setStats((prev) => ({ ...prev, ...data }));
@@ -271,6 +274,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
       })
       .catch(() => {})
       .finally(() => {
+        if (seq !== requestSeq.current) return;
         setLoading(false);
         setFetching(false);
       });

@@ -193,28 +193,35 @@ async function runCheck(deps, connection) {
     entry.depleted = depleted;
     scheduleNext(entry, usage);
 
-    const isActive = connection.isActive ?? true;
-    const marked = Boolean(connection.providerSpecificData?.autoQuotaDisabled);
-    const guardDisabled = deps.isCodexGuardDisabled ? deps.isCodexGuardDisabled(connection.id, connection.provider) : false;
+    // Re-read immediately before any state change. Token refresh and a manual
+    // dashboard toggle may have updated the row while the usage request ran.
+    const current = deps.getConnectionById
+      ? await deps.getConnectionById(connection.id)
+      : connection;
+    if (!current) return;
+
+    const isActive = current.isActive ?? true;
+    const marked = Boolean(current.providerSpecificData?.autoQuotaDisabled);
+    const guardDisabled = deps.isCodexGuardDisabled ? deps.isCodexGuardDisabled(current.id, current.provider) : false;
 
     if (depleted && isActive && !guardDisabled) {
-      await deps.updateProviderConnection(connection.id, {
+      await deps.updateProviderConnection(current.id, {
         isActive: false,
         providerSpecificData: {
-          ...(connection.providerSpecificData || {}),
+          ...(current.providerSpecificData || {}),
           autoQuotaDisabled: new Date().toISOString(),
         },
       });
-      log.info("QUOTA-MONITOR", `${connection.provider}/${connection.displayName || String(connection.id).slice(0, 8)} depleted → auto OFF`);
+      log.info("QUOTA-MONITOR", `${current.provider}/${current.displayName || String(current.id).slice(0, 8)} depleted → auto OFF`);
     } else if (!depleted && !isActive && marked && !guardDisabled) {
       // Only re-enable connections this monitor disabled — manual offs stay off.
-      const psd = { ...(connection.providerSpecificData || {}) };
+      const psd = { ...(current.providerSpecificData || {}) };
       delete psd.autoQuotaDisabled;
-      await deps.updateProviderConnection(connection.id, {
+      await deps.updateProviderConnection(current.id, {
         isActive: true,
         providerSpecificData: psd,
       });
-      log.info("QUOTA-MONITOR", `${connection.provider}/${connection.displayName || String(connection.id).slice(0, 8)} recovered → auto ON`);
+      log.info("QUOTA-MONITOR", `${current.provider}/${current.displayName || String(current.id).slice(0, 8)} recovered → auto ON`);
     }
   } catch (e) {
     entry.failures = (entry.failures || 0) + 1;
@@ -308,6 +315,7 @@ async function resolveDefaults() {
     const guard = await import("@/sse/services/codexQuotaGuard.js");
     defaultsCache = {
       getConnections: () => db.getProviderConnections({}),
+      getConnectionById: db.getProviderConnectionById,
       getUsageForProvider: usage.getUsageForProvider,
       updateProviderConnection: db.updateProviderConnection,
       checkAndRefreshToken: tokenRefresh.checkAndRefreshToken,
@@ -325,7 +333,7 @@ export function startQuotaMonitor(deps = {}, injectedLog) {
   loadState();
 
   const d = {};
-  for (const key of ["getConnections", "getUsageForProvider", "updateProviderConnection", "checkAndRefreshToken", "resolveConnectionProxyConfig", "isCodexGuardDisabled"]) {
+  for (const key of ["getConnections", "getConnectionById", "getUsageForProvider", "updateProviderConnection", "checkAndRefreshToken", "resolveConnectionProxyConfig", "isCodexGuardDisabled"]) {
     d[key] = deps[key] || ((...args) => resolveDefaults().then((def) => def[key](...args)));
   }
   // Not function-shaped like the others: fill lazily on the first tick that

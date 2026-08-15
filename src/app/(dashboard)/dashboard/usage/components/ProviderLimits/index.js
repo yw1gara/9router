@@ -132,6 +132,8 @@ export default function ProviderLimits() {
   const [errors, setErrors] = useState({});
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [autoPingMaps, setAutoPingMaps] = useState({ claude: {}, codex: {} });
+  const autoPingMapsRef = useRef(autoPingMaps);
+  useEffect(() => { autoPingMapsRef.current = autoPingMaps; }, [autoPingMaps]);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [hasHydratedAutoRefresh, setHasHydratedAutoRefresh] = useState(false);
   const [refreshingAll, setRefreshingAll] = useState(false);
@@ -406,7 +408,12 @@ export default function ProviderLimits() {
         const res = await fetch(`/api/providers/${id}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ isActive }),
+          body: JSON.stringify({
+            isActive,
+            // Manual off clears the monitor's autoQuotaDisabled flag so the
+            // background monitor won't re-enable this account later.
+            ...(isActive ? {} : { providerSpecificData: { autoQuotaDisabled: null } }),
+          }),
         });
         if (res.ok) {
           setQuotaData((prev) => {
@@ -557,9 +564,13 @@ export default function ProviderLimits() {
     const settingsKey = AUTO_PING_SETTINGS_KEYS[provider];
     if (!settingsKey) return;
 
-    const previous = autoPingMaps;
-    const nextProviderMap = { ...(autoPingMaps[provider] || {}), [connectionId]: on };
-    const nextMaps = { ...autoPingMaps, [provider]: nextProviderMap };
+    // Build from the ref (latest value) — the closure over state would lose
+    // concurrent toggles fired before a re-render.
+    const latest = autoPingMapsRef.current;
+    const previous = latest;
+    const nextProviderMap = { ...(latest[provider] || {}), [connectionId]: on };
+    const nextMaps = { ...latest, [provider]: nextProviderMap };
+    autoPingMapsRef.current = nextMaps;
     setAutoPingMaps(nextMaps);
     try {
       const r = await fetch("/api/settings", { cache: "no-store" });
@@ -571,9 +582,10 @@ export default function ProviderLimits() {
         body: JSON.stringify({ [settingsKey]: cfg }),
       });
     } catch {
+      autoPingMapsRef.current = previous;
       setAutoPingMaps(previous);
     }
-  }, [autoPingMaps]);
+  }, []);
 
   const updateQuotaVisibility = useCallback(async (nextVisibility, previousVisibility) => {
     setQuotaVisibility(nextVisibility);

@@ -140,6 +140,13 @@ export async function PUT(request, { params }) {
         ...(providerSpecificData || {}),
       };
 
+      // A null marker means "the user turned this off manually" — remove the
+      // monitor's autoQuotaDisabled flag so the background monitor cannot
+      // re-enable the connection against the user's intent.
+      if (updateData.providerSpecificData.autoQuotaDisabled === null) {
+        delete updateData.providerSpecificData.autoQuotaDisabled;
+      }
+
       if (proxyConfig.hasAnyProxyField) {
         updateData.providerSpecificData.connectionProxyEnabled = proxyConfig.connectionProxyEnabled;
         updateData.providerSpecificData.connectionProxyUrl = proxyConfig.connectionProxyUrl;

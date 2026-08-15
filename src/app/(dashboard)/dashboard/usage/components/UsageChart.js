@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import PropTypes from "prop-types";
 import {
   AreaChart,
@@ -26,19 +26,22 @@ export default function UsageChart({ period = "7d" }) {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [viewMode, setViewMode] = useState("tokens");
+  const requestSeq = useRef(0);
 
   const fetchData = useCallback(async () => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
       const res = await fetch(`/api/usage/chart?period=${period}`);
       if (res.ok) {
         const json = await res.json();
+        if (seq !== requestSeq.current) return;
         setData(json);
       }
     } catch (e) {
       console.error("Failed to fetch chart data:", e);
     } finally {
-      setLoading(false);
+      if (seq === requestSeq.current) setLoading(false);
     }
   }, [period]);
 

@@ -444,7 +444,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         await clearAccountError(credentials.connectionId, credentials, model);
         clearProviderFailure(provider);
       },
-      externalSignal
+      // Pass the combined signal (client disconnect + combo target timeout) so
+      // the executor's fetch is aborted when the client is gone, not just when
+      // the combo leg times out.
+      externalSignal: effectiveSignal || null
     });
     } catch (e) {
       semaphoreRelease();
@@ -468,20 +471,24 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // marked unavailable and the gate is blocked on 429. Releasing earlier
     // would promote an already-queued request into the just-rate-limited
     // account before the cooldown is visible.
+    // NOTE: shouldFallback/cooldownMs are declared here (outside the try) —
+    // they are consumed below after the semaphore is released.
+    let shouldFallback;
+    let cooldownMs;
     try {
-    // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-    const { shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
+      // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
+      ({ shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs));
 
-    // Record provider-level failure for the circuit breaker (5xx/timeout only;
-    // 429 stays per-account). Deduplicated per connection within 5s.
-    recordProviderFailure(provider, result.status, typeof result.error === "string" ? result.error : result.error?.message, log, credentials.connectionId);
+      // Record provider-level failure for the circuit breaker (5xx/timeout only;
+      // 429 stays per-account). Deduplicated per connection within 5s.
+      recordProviderFailure(provider, result.status, typeof result.error === "string" ? result.error : result.error?.message, log, credentials.connectionId);
 
-    // Block the account's semaphore gate on 429 so requests already queued for
-    // this account do not hit it again before the DB cooldown is read back.
-    if (semaphoreKey && Number(result.status) === 429 && cooldownMs > 0) {
-      markAccountSemaphoreBlocked(semaphoreKey, cooldownMs);
-      log.info("SEMAPHORE", `Account ${credentials.connectionName} gate blocked for ${Math.round(cooldownMs / 1000)}s [429]`);
-    }
+      // Block the account's semaphore gate on 429 so requests already queued for
+      // this account do not hit it again before the DB cooldown is read back.
+      if (semaphoreKey && Number(result.status) === 429 && cooldownMs > 0) {
+        markAccountSemaphoreBlocked(semaphoreKey, cooldownMs);
+        log.info("SEMAPHORE", `Account ${credentials.connectionName} gate blocked for ${Math.round(cooldownMs / 1000)}s [429]`);
+      }
     } finally {
       semaphoreRelease();
     }

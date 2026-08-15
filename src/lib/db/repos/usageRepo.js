@@ -457,6 +457,7 @@ export async function getUsageStats(period = "all") {
       stats.totalCompletionTokens += day.completionTokens || 0;
       stats.totalCachedTokens += day.cachedTokens || 0;
       stats.totalCost += day.cost || 0;
+      stats.totalRequests += day.requests || 0;
 
       for (const [prov, p] of Object.entries(day.byProvider || {})) {
         if (!stats.byProvider[prov]) stats.byProvider[prov] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
@@ -540,7 +541,7 @@ export async function getUsageStats(period = "all") {
     // Overlay precise lastUsed timestamps from history
     const overlayCutoff = maxDays ? Date.now() - maxDays * 86400000 : 0;
     const histRows = db.all(
-      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint FROM usageHistory WHERE timestamp >= ?`,
+      `SELECT timestamp, provider, model, connectionId, apiKey, endpoint FROM usageHistory WHERE timestamp >= ? ORDER BY timestamp DESC LIMIT 100000`,
       [new Date(overlayCutoff).toISOString()]
     );
     for (const e of histRows) {
@@ -654,7 +655,11 @@ export async function getUsageStats(period = "all") {
     }
   }
 
-  stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
+  // daily-summary path accumulates totalRequests from day.requests (includes
+  // providerless rows); live-history path derives it from byProvider.
+  if (!useDailySummary) {
+    stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
+  }
   return stats;
 }
 

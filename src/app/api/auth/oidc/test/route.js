@@ -3,6 +3,18 @@ import { cookies } from "next/headers";
 import { getSettings } from "@/lib/localDb";
 import { fetchOidcDiscovery, getPublicOrigin, probeOidcClientSecret } from "@/lib/auth/oidc";
 import { verifyDashboardAuthToken } from "@/lib/auth/dashboardSession";
+import { assertPublicUrl } from "@/shared/utils/ssrfGuard";
+
+// A user-supplied issuer URL may point anywhere; block private/internal hosts
+// and reject discovery endpoints that do not match the issuer origin (a
+// malicious discovery doc could otherwise steer the client-secret probe to an
+// attacker-controlled server).
+function assertPublicEndpoint(url, field) {
+  assertPublicUrl(url);
+  const parsed = new URL(url);
+  if (parsed.protocol !== "https:") throw new Error(`${field} must use https`);
+  return parsed.origin;
+}
 
 async function canAccessTestRoute() {
   const settings = await getSettings();
@@ -38,8 +50,28 @@ export async function POST(request) {
       return NextResponse.json({ error: "Client ID is required" }, { status: 400 });
     }
 
+    // SSRF guard: reject private/internal hosts and enforce HTTPS for the
+    // user-supplied issuer URL.
+    assertPublicUrl(issuerUrl);
+    if (new URL(issuerUrl).protocol !== "https:") {
+      return NextResponse.json({ error: "Issuer URL must use https" }, { status: 400 });
+    }
+
     const discovery = await fetchOidcDiscovery(issuerUrl);
     const redirectUri = `${getPublicOrigin(request)}/api/auth/oidc/callback`;
+
+    // Validate the token endpoint from the untrusted discovery document before
+    // sending the client secret to it.
+    assertPublicEndpoint(discovery.token_endpoint, "token_endpoint");
+    const issuerOrigin = new URL(issuerUrl).origin;
+    const tokenOrigin = new URL(discovery.token_endpoint).origin;
+    if (tokenOrigin !== issuerOrigin) {
+      return NextResponse.json({
+        error: "token_endpoint must be same-origin as the issuer",
+        issuerOrigin,
+        tokenOrigin,
+      }, { status: 400 });
+    }
     const secretProbe = await probeOidcClientSecret({
       tokenEndpoint: discovery.token_endpoint,
       clientId,
