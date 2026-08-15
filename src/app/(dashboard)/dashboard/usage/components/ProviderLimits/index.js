@@ -153,6 +153,8 @@ export default function ProviderLimits() {
   const [expiringFirst, setExpiringFirst] = useState(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
   const [bulkToggling, setBulkToggling] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [deleteEmptyConfirm, setDeleteEmptyConfirm] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(CONNECTIONS_PAGE_SIZE);
   const [customPageSizeInput, setCustomPageSizeInput] = useState(
@@ -744,6 +746,59 @@ export default function ProviderLimits() {
     bulkSetActive(ids, true);
   };
 
+  // Connections on the current page that are turned off AND have depleted
+  // quota — the candidates for bulk deletion.
+  const offEmptyConnections = useMemo(
+    () => sortedConnections.filter((c) => !(c.isActive ?? true) && isConnectionDepleted(c)),
+    [sortedConnections],
+  );
+
+  const handleDeleteOffEmpty = useCallback(async () => {
+    const targets = sortedConnections.filter(
+      (c) => !(c.isActive ?? true) && isConnectionDepleted(c),
+    );
+    if (!targets.length || bulkDeleting) return;
+    setBulkDeleting(true);
+    try {
+      await Promise.all(
+        targets.map(async (c) => {
+          const res = await fetch(`/api/providers/${c.id}`, { method: "DELETE" });
+          if (!res.ok) throw new Error(`Failed to delete ${c.id}`);
+          setQuotaData((prev) => {
+            const next = { ...prev };
+            delete next[c.id];
+            return next;
+          });
+        }),
+      );
+      // Purge deleted connections from the localStorage quota cache.
+      if (typeof window !== "undefined") {
+        try {
+          const cache = getQuotaCache();
+          let changed = false;
+          for (const c of targets) {
+            if (cache[c.id]) {
+              delete cache[c.id];
+              changed = true;
+            }
+          }
+          if (changed) {
+            window.localStorage.setItem(QUOTA_CACHE_KEY, JSON.stringify(cache));
+          }
+        } catch (e) {
+          console.error("Error purging quota cache:", e);
+        }
+      }
+      await reconcileConnectionsPage(fetchConnections, page);
+    } catch (error) {
+      console.error("Error deleting depleted connections:", error);
+      await reconcileConnectionsPage(fetchConnections, page);
+    } finally {
+      setBulkDeleting(false);
+      setDeleteEmptyConfirm(false);
+    }
+  }, [sortedConnections, bulkDeleting, fetchConnections, page]);
+
   const selectedProviderLabel =
     providerFilter === "all" ? "All providers" : providerFilter;
   const hasEligibleConnections = totals.eligibleConnections > 0;
@@ -969,6 +1024,20 @@ export default function ProviderLimits() {
               check_circle
             </span>
             <span className="hidden sm:inline">Turn on Available</span>
+          </button>
+
+          {/* Bulk: delete turned-off empty connections */}
+          <button
+            type="button"
+            onClick={() => setDeleteEmptyConfirm(true)}
+            disabled={bulkDeleting || bulkToggling || offEmptyConnections.length === 0}
+            className="flex h-8 shrink-0 items-center gap-1 rounded-lg border border-red-500/40 bg-red-500/5 px-2 text-xs text-red-600 transition-colors hover:bg-red-500/15 disabled:opacity-50 dark:text-red-400"
+            title="Delete connections that are turned off with depleted quota on the current page"
+          >
+            <span className="material-symbols-outlined text-[14px]">delete</span>
+            <span className="hidden sm:inline">
+              Delete Empty{offEmptyConnections.length > 0 ? ` (${offEmptyConnections.length})` : ""}
+            </span>
           </button>
 
           {/* Auto-refresh toggle */}
@@ -1414,6 +1483,20 @@ export default function ProviderLimits() {
             </div>
           </div>
         </div>
+
+      <ConfirmModal
+        isOpen={deleteEmptyConfirm}
+        onClose={() => {
+          if (!bulkDeleting) setDeleteEmptyConfirm(false);
+        }}
+        onConfirm={handleDeleteOffEmpty}
+        title="Delete empty connections?"
+        message={`Permanently delete ${offEmptyConnections.length} turned-off connection${offEmptyConnections.length === 1 ? "" : "s"} with depleted quota on the current page. This cannot be undone.`}
+        confirmText={`Delete ${offEmptyConnections.length} connection${offEmptyConnections.length === 1 ? "" : "s"}`}
+        cancelText="Cancel"
+        variant="danger"
+        loading={bulkDeleting}
+      />
 
       <ConfirmModal
         isOpen={Boolean(resetConfirmState)}
