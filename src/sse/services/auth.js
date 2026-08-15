@@ -253,9 +253,15 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
   const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
 
-  // Codex usage-limit guard: hard-disable the account in the DB until the 24h re-check window
+  // Codex usage-limit guard: hard-disable the account in the DB until the 24h re-check window.
+  // Fail-open: a guard error (e.g. stale lock, missing sqlite3 CLI) must not
+  // abort this function — the cooldown bookkeeping below still needs to run.
   if (Number(status) === 429 && resolveProviderId(provider) === "codex") {
-    await disableCodexAccountOnQuota(connectionId, provider, status, reason);
+    try {
+      await disableCodexAccountOnQuota(connectionId, provider, status, reason);
+    } catch (guardError) {
+      console.error(`[AUTH] codex quota guard failed for ${connectionId?.slice(0, 8)}: ${guardError?.message || guardError}`);
+    }
   }
 
   await updateProviderConnection(connectionId, {

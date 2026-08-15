@@ -446,20 +446,29 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       },
       externalSignal
     });
-    } finally {
-      // Always release the semaphore slot, even if handleChatCore throws
+    } catch (e) {
       semaphoreRelease();
+      throw e;
     }
 
-    if (result.success) return result.response;
+    if (result.success) {
+      semaphoreRelease();
+      return result.response;
+    }
 
     // If the combo target timed out or the client aborted, do NOT mark the
     // account unavailable — the failure was local, not the provider's fault.
     if (externalSignal?.aborted || request?.signal?.aborted) {
+      semaphoreRelease();
       log.info("CHAT", `[${provider}/${model}] aborted after upstream attempt — not marking account`);
       return new Response(null, { status: 499 });
     }
 
+    // Failure path: the semaphore slot is released only AFTER the account is
+    // marked unavailable and the gate is blocked on 429. Releasing earlier
+    // would promote an already-queued request into the just-rate-limited
+    // account before the cooldown is visible.
+    try {
     // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
     const { shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs);
 
@@ -472,6 +481,9 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     if (semaphoreKey && Number(result.status) === 429 && cooldownMs > 0) {
       markAccountSemaphoreBlocked(semaphoreKey, cooldownMs);
       log.info("SEMAPHORE", `Account ${credentials.connectionName} gate blocked for ${Math.round(cooldownMs / 1000)}s [429]`);
+    }
+    } finally {
+      semaphoreRelease();
     }
 
     // Per-request exhaustion tracking: an auth (401/403) or connection-level

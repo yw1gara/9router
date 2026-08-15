@@ -50,7 +50,11 @@ function writeState(state) {
   fs.renameSync(tmp, statePath);
 }
 
-// mkdir-based lock — atomic on all platforms, no dependencies
+// mkdir-based lock — atomic on all platforms, no dependencies.
+// Crash-safe: a lock dir left behind by a hard kill (SIGKILL/OOM never runs
+// the finally) is detected by age and broken instead of wedging every future
+// guard call behind a 10s event-loop stall.
+const STALE_LOCK_MS = 15000;
 function withStateLock(fn) {
   if (!statePath) return fn();
   const lock = `${statePath}.lock`;
@@ -61,6 +65,17 @@ function withStateLock(fn) {
       break;
     } catch (e) {
       if (e.code !== "EEXIST") throw e;
+      let lockAge = 0;
+      try {
+        lockAge = Date.now() - fs.statSync(lock).mtimeMs;
+      } catch { /* vanished between mkdir and stat — retry immediately */ }
+      if (lockAge > STALE_LOCK_MS) {
+        try {
+          fs.rmSync(lock, { recursive: true, force: true });
+          console.warn(`[QUOTA-GUARD] broke stale state lock (age ${Math.round(lockAge / 1000)}s)`);
+        } catch { /* removal raced with the owner — keep waiting */ }
+        continue;
+      }
       if (Date.now() - started > 10000) throw new Error("quota state lock timeout");
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
     }

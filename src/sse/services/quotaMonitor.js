@@ -231,6 +231,14 @@ async function tick(deps) {
   if (ticking) return;
   ticking = true;
   try {
+    // Backfill non-injected defaults (production start passes no deps).
+    if (!Array.isArray(deps.USAGE_APIKEY_PROVIDERS)) {
+      try {
+        deps.USAGE_APIKEY_PROVIDERS = (await resolveDefaults()).USAGE_APIKEY_PROVIDERS;
+      } catch {
+        deps.USAGE_APIKEY_PROVIDERS = [];
+      }
+    }
     const connections = await deps.getConnections();
     const byId = new Map(connections.map((c) => [c.id, c]));
     // Drop entries for deleted connections.
@@ -286,38 +294,43 @@ async function tick(deps) {
  * Every dependency is injectable for tests; production defaults are
  * resolved lazily on the first tick to keep module import cheap.
  */
+// Production defaults are resolved lazily (kept out of the module hot path)
+// and shared between startQuotaMonitor and tick so eligibility checks that
+// need them synchronously (USAGE_APIKEY_PROVIDERS) can be backfilled.
+let defaultsCache = null;
+async function resolveDefaults() {
+  if (!defaultsCache) {
+    const db = await import("@/lib/localDb.js");
+    const usage = await import("open-sse/services/usage.js");
+    const tokenRefresh = await import("@/sse/services/tokenRefresh.js");
+    const proxy = await import("@/lib/network/connectionProxy.js");
+    const providers = await import("@/shared/constants/providers.js");
+    const guard = await import("@/sse/services/codexQuotaGuard.js");
+    defaultsCache = {
+      getConnections: () => db.getProviderConnections({}),
+      getUsageForProvider: usage.getUsageForProvider,
+      updateProviderConnection: db.updateProviderConnection,
+      checkAndRefreshToken: tokenRefresh.checkAndRefreshToken,
+      resolveConnectionProxyConfig: proxy.resolveConnectionProxyConfig,
+      isCodexGuardDisabled: guard.isAccountGuardDisabled || null,
+      USAGE_APIKEY_PROVIDERS: providers.USAGE_APIKEY_PROVIDERS || [],
+    };
+  }
+  return defaultsCache;
+}
+
 export function startQuotaMonitor(deps = {}, injectedLog) {
   if (injectedLog) log = injectedLog;
   if (timer) return;
   loadState();
 
-  let defaults = null;
-  const resolveDefaults = async () => {
-    if (!defaults) {
-      const db = await import("@/lib/localDb.js");
-      const usage = await import("open-sse/services/usage.js");
-      const tokenRefresh = await import("@/sse/services/tokenRefresh.js");
-      const proxy = await import("@/lib/network/connectionProxy.js");
-      const providers = await import("@/shared/constants/providers.js");
-      const guard = await import("@/sse/services/codexQuotaGuard.js");
-      defaults = {
-        getConnections: () => db.getProviderConnections({}),
-        getUsageForProvider: usage.getUsageForProvider,
-        updateProviderConnection: db.updateProviderConnection,
-        checkAndRefreshToken: tokenRefresh.checkAndRefreshToken,
-        resolveConnectionProxyConfig: proxy.resolveConnectionProxyConfig,
-        isCodexGuardDisabled: guard.isAccountGuardDisabled || null,
-        USAGE_APIKEY_PROVIDERS: providers.USAGE_APIKEY_PROVIDERS || [],
-      };
-    }
-    return defaults;
-  };
-
   const d = {};
   for (const key of ["getConnections", "getUsageForProvider", "updateProviderConnection", "checkAndRefreshToken", "resolveConnectionProxyConfig", "isCodexGuardDisabled"]) {
     d[key] = deps[key] || ((...args) => resolveDefaults().then((def) => def[key](...args)));
   }
-  d.USAGE_APIKEY_PROVIDERS = deps.USAGE_APIKEY_PROVIDERS;
+  // Not function-shaped like the others: fill lazily on the first tick that
+  // needs it (see tick). Tests may inject it directly.
+  d.USAGE_APIKEY_PROVIDERS = Array.isArray(deps.USAGE_APIKEY_PROVIDERS) ? deps.USAGE_APIKEY_PROVIDERS : undefined;
 
   timer = setInterval(() => { tick(d).catch(() => {}); }, TICK_MS);
   if (typeof timer.unref === "function") timer.unref();
