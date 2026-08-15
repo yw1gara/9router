@@ -18,13 +18,27 @@ const STATUS_CONFIG = {
   unknown: { icon: "help", color: "#6b7280", label: "Unknown" },
 };
 
+function formatRemaining(ms) {
+  const secs = Math.ceil(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+}
+
 export default function ModelAvailabilityBadge() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
   const [clearing, setClearing] = useState(null);
+  const [now, setNow] = useState(() => Date.now());
   const ref = useRef(null);
   const notify = useNotificationStore();
+
+  // Live 1s tick so cooldown countdowns animate without refetching the API.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -93,7 +107,7 @@ export default function ModelAvailabilityBadge() {
 
   return (
     <div className="relative" ref={ref}>
-      {/* <button
+      <button
         onClick={() => setExpanded(!expanded)}
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
           isHealthy
@@ -106,8 +120,8 @@ export default function ModelAvailabilityBadge() {
         </span>
         {isHealthy
           ? "All models operational"
-          : `${unavailableCount} model${unavailableCount !== 1 ? "s" : ""} with issues`}
-      </button> */}
+          : `${unavailableCount} model${unavailableCount !== 1 ? "s" : ""} in cooldown`}
+      </button>
 
       {expanded && (
         <div className="absolute top-full right-0 mt-2 w-80 bg-surface border border-border rounded-xl shadow-2xl z-50 overflow-hidden">
@@ -149,15 +163,20 @@ export default function ModelAvailabilityBadge() {
                             key={`${m.provider}-${m.model}`}
                             className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-surface/30"
                           >
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <span
-                                className="material-symbols-outlined text-[14px] shrink-0"
-                                style={{ color: status.color }}
-                              >
-                                {status.icon}
-                              </span>
-                              <span className="font-mono text-xs text-text-main truncate">{m.model}</span>
-                            </div>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span
+                        className="material-symbols-outlined text-[14px] shrink-0"
+                        style={{ color: status.color }}
+                      >
+                        {status.icon}
+                      </span>
+                      <span className="font-mono text-xs text-text-main truncate">{m.model}</span>
+                      {m.until && new Date(m.until).getTime() > now && (
+                        <span className="font-mono text-[10px] text-orange-500 shrink-0" title={`Cooldown until ${new Date(m.until).toLocaleString()}`}>
+                          ⏱ {formatRemaining(new Date(m.until).getTime() - now)}
+                        </span>
+                      )}
+                    </div>
                             {m.status === "cooldown" && (
                               <Button
                                 size="sm"
