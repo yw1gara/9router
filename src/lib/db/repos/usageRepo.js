@@ -731,6 +731,382 @@ export async function getChartData(period = "7d") {
   });
 }
 
+function periodWindow(period = "7d") {
+  const now = new Date();
+  if (period === "today") {
+    const start = new Date(now);
+    start.setHours(0, 0, 0, 0);
+    return { start, end: now };
+  }
+  const ms = PERIOD_MS[period] || PERIOD_MS["7d"];
+  return { start: new Date(now.getTime() - ms), end: now };
+}
+
+function percentile(values, p) {
+  const nums = values.filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
+  if (!nums.length) return 0;
+  const idx = Math.min(nums.length - 1, Math.max(0, Math.ceil((p / 100) * nums.length) - 1));
+  return nums[idx];
+}
+
+function analyticsBucketConfig(period, end) {
+  if (period === "today" || period === "24h") {
+    const now = end;
+    return {
+      count: 24,
+      sizeMs: 60 * 60 * 1000,
+      startMs: period === "today"
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+        : now.getTime() - 24 * 60 * 60 * 1000,
+      label: (ts) => new Date(ts).toLocaleTimeString("en-US", { hour: "2-digit", hour12: false }),
+    };
+  }
+  const count = period === "30d" ? 30 : period === "60d" ? 60 : 7;
+  const today = new Date(end);
+  today.setHours(0, 0, 0, 0);
+  return {
+    count,
+    sizeMs: 24 * 60 * 60 * 1000,
+    startMs: today.getTime() - (count - 1) * 24 * 60 * 60 * 1000,
+    label: (ts) => new Date(ts).toLocaleDateString("en-US", { month: "short", day: "numeric" }),
+  };
+}
+
+function tokensFromRow(row) {
+  const tokens = row.tokens ? parseJson(row.tokens, {}) : {};
+  const promptTokens = row.promptTokens ?? tokens.prompt_tokens ?? tokens.input_tokens ?? 0;
+  const completionTokens = row.completionTokens ?? tokens.completion_tokens ?? tokens.output_tokens ?? 0;
+  const cachedTokens = tokens.cached_tokens ?? tokens.cache_read_input_tokens ?? 0;
+  return { promptTokens, completionTokens, cachedTokens, totalTokens: promptTokens + completionTokens };
+}
+
+function bumpAnalyticsMap(map, key, values = {}) {
+  if (!map[key]) {
+    map[key] = {
+      requests: 0,
+      promptTokens: 0,
+      completionTokens: 0,
+      cachedTokens: 0,
+      tokens: 0,
+      cost: 0,
+      errors: 0,
+      ok: 0,
+    };
+  }
+  const item = map[key];
+  item.requests += 1;
+  item.promptTokens += values.promptTokens || 0;
+  item.completionTokens += values.completionTokens || 0;
+  item.cachedTokens += values.cachedTokens || 0;
+  item.tokens += values.totalTokens || values.tokens || 0;
+  item.cost += values.cost || 0;
+  if (values.error) item.errors += 1;
+  else item.ok += 1;
+  if (values.meta) Object.assign(item, values.meta);
+  return item;
+}
+
+const OK_STATUSES = new Set(["ok", "success", "completed"]);
+
+function normalizeStatus(status) {
+  const s = String(status || "ok").trim().toLowerCase();
+  return OK_STATUSES.has(s) ? "ok" : s;
+}
+
+function isErrorStatus(status) {
+  return !OK_STATUSES.has(String(status || "ok").trim().toLowerCase());
+}
+
+export async function getUsageAnalytics(period = "7d") {
+  const db = await getAdapter();
+  const { start, end } = periodWindow(period);
+  const useRawRows = period === "today" || period === "24h";
+
+  const [{ getProviderConnections }] = await Promise.all([
+    import("./connectionsRepo.js"),
+  ]);
+
+  let allConnections = [];
+  try { allConnections = await getProviderConnections({}); } catch {}
+  const connectionMap = {};
+  for (const c of allConnections) {
+    connectionMap[c.id] = {
+      id: c.id,
+      name: c.name || c.email || c.displayName || `Account ${String(c.id).slice(0, 8)}`,
+      provider: c.provider,
+      isActive: c.isActive !== false,
+      authType: c.authType,
+    };
+  }
+
+  const bucketCfg = analyticsBucketConfig(period, end);
+  const velocity = Array.from({ length: bucketCfg.count }, (_, i) => {
+    const ts = bucketCfg.startMs + i * bucketCfg.sizeMs;
+    return { label: bucketCfg.label(ts), requests: 0, tokens: 0, cost: 0, errors: 0 };
+  });
+
+  const providerMap = {};
+  const modelMap = {};
+  const connectionAgg = {};
+  const statusMap = {};
+  const providerModelErrorMap = {};
+  const summary = {
+    requests: 0,
+    promptTokens: 0,
+    completionTokens: 0,
+    cachedTokens: 0,
+    tokens: 0,
+    cost: 0,
+    errors: 0,
+  };
+
+  if (useRawRows) {
+    // Bounded window (≤24h) — per-row aggregation in JS is fine. The LIMIT is
+    // defensive: even a very busy instance stays within memory limits, and the
+    // truncated tail only affects extreme edge cases.
+    const RAW_LIMIT = 100_000;
+    const rows = db.all(
+      `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, cost, status, tokens
+       FROM usageHistory
+       WHERE timestamp >= ? AND timestamp <= ?
+       ORDER BY timestamp ASC
+       LIMIT ?`,
+      [start.toISOString(), end.toISOString(), RAW_LIMIT],
+    );
+
+    for (const row of rows) {
+      const t = new Date(row.timestamp).getTime();
+      const idx = Math.floor((t - bucketCfg.startMs) / bucketCfg.sizeMs);
+      const tokenInfo = tokensFromRow(row);
+      const cost = row.cost || 0;
+      const isError = isErrorStatus(row.status);
+
+      summary.requests += 1;
+      summary.promptTokens += tokenInfo.promptTokens;
+      summary.completionTokens += tokenInfo.completionTokens;
+      summary.cachedTokens += tokenInfo.cachedTokens;
+      summary.tokens += tokenInfo.totalTokens;
+      summary.cost += cost;
+      if (isError) summary.errors += 1;
+
+      if (idx >= 0 && idx < velocity.length) {
+        velocity[idx].requests += 1;
+        velocity[idx].tokens += tokenInfo.totalTokens;
+        velocity[idx].cost += cost;
+        if (isError) velocity[idx].errors += 1;
+      }
+
+      const provider = row.provider || "unknown";
+      bumpAnalyticsMap(providerMap, provider, { ...tokenInfo, cost, error: isError, meta: { provider } });
+
+      const modelKey = `${row.model || "unknown"}|${provider}`;
+      bumpAnalyticsMap(modelMap, modelKey, {
+        ...tokenInfo,
+        cost,
+        error: isError,
+        meta: { model: row.model || "unknown", provider },
+      });
+
+      const connId = row.connectionId || "local-no-account";
+      const conn = connectionMap[connId];
+      bumpAnalyticsMap(connectionAgg, connId, {
+        ...tokenInfo,
+        cost,
+        error: isError,
+        meta: {
+          connectionId: connId,
+          name: conn?.name || (connId === "local-no-account" ? "Local / no account" : `Account ${String(connId).slice(0, 8)}`),
+          provider: conn?.provider || provider,
+          isActive: conn?.isActive ?? null,
+          authType: conn?.authType || null,
+        },
+      });
+
+      const status = normalizeStatus(row.status);
+      statusMap[status] = (statusMap[status] || 0) + 1;
+      if (isError) {
+        const errKey = `${provider}|${row.model || "unknown"}`;
+        bumpAnalyticsMap(providerModelErrorMap, errKey, {
+          ...tokenInfo,
+          cost,
+          error: true,
+          meta: { provider, model: row.model || "unknown" },
+        });
+      }
+    }
+  } else {
+    // Longer periods: aggregate from the per-day summary table (cheap, one row
+    // per day) instead of scanning every usageHistory row.
+    const maxDays = bucketCfg.count;
+    const today = new Date(end);
+    today.setHours(0, 0, 0, 0);
+    const bucketKey = (i) => {
+      const d = new Date(today.getTime() - (bucketCfg.count - 1 - i) * 24 * 60 * 60 * 1000);
+      return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    };
+    const bucketIndexByKey = {};
+    for (let i = 0; i < bucketCfg.count; i++) bucketIndexByKey[bucketKey(i)] = i;
+
+    const dayRows = loadDaysInRange(db, maxDays);
+    const tokenCost = (day) => ({
+      promptTokens: day.promptTokens || 0,
+      completionTokens: day.completionTokens || 0,
+      cachedTokens: day.cachedTokens || 0,
+      totalTokens: (day.promptTokens || 0) + (day.completionTokens || 0),
+      cost: day.cost || 0,
+    });
+
+    for (const dayRow of dayRows) {
+      const idx = bucketIndexByKey[dayRow.dateKey];
+      const day = parseJson(dayRow.data, {}) || {};
+      const tokenInfo = tokenCost(day);
+      if (idx != null) {
+        velocity[idx].requests = day.requests || 0;
+        velocity[idx].tokens = tokenInfo.totalTokens;
+        velocity[idx].cost = tokenInfo.cost;
+      }
+
+      summary.requests += day.requests || 0;
+      summary.promptTokens += tokenInfo.promptTokens;
+      summary.completionTokens += tokenInfo.completionTokens;
+      summary.cachedTokens += tokenInfo.cachedTokens;
+      summary.tokens += tokenInfo.totalTokens;
+      summary.cost += tokenInfo.cost;
+
+      for (const [provider, values] of Object.entries(day.byProvider || {})) {
+        const tokenInfoP = tokensFromRow({ tokens: values });
+        bumpAnalyticsMap(providerMap, provider, { ...tokenInfoP, cost: values.cost || 0, error: false, meta: { provider } });
+      }
+
+      for (const [modelKey, values] of Object.entries(day.byModel || {})) {
+        const rawModel = values.rawModel || String(modelKey).split("|")[0] || "unknown";
+        const provider = values.provider || String(modelKey).split("|")[1] || "unknown";
+        const tokenInfoM = tokensFromRow({ tokens: values });
+        bumpAnalyticsMap(modelMap, `${rawModel}|${provider}`, {
+          ...tokenInfoM,
+          cost: values.cost || 0,
+          error: false,
+          meta: { model: rawModel, provider },
+        });
+      }
+
+      for (const [connectionId, values] of Object.entries(day.byAccount || {})) {
+        const conn = connectionMap[connectionId];
+        const provider = conn?.provider || values.provider || "unknown";
+        const tokenInfoC = tokensFromRow({ tokens: values });
+        bumpAnalyticsMap(connectionAgg, connectionId, {
+          ...tokenInfoC,
+          cost: values.cost || 0,
+          error: false,
+          meta: {
+            connectionId,
+            name: conn?.name || `Account ${String(connectionId).slice(0, 8)}`,
+            provider,
+            isActive: conn?.isActive ?? null,
+            authType: conn?.authType || null,
+          },
+        });
+      }
+    }
+
+    // Error/status breakdown over longer windows is computed DB-side — the
+    // daily summary does not store status, so a grouped scan is the cheap path.
+    const groupedRows = db.all(
+      `SELECT COALESCE(provider, 'unknown') AS provider, COALESCE(model, 'unknown') AS model,
+              COALESCE(status, 'ok') AS status, COUNT(*) AS n
+       FROM usageHistory
+       WHERE timestamp >= ?
+       GROUP BY provider, model, status`,
+      [start.toISOString()],
+    );
+    for (const group of groupedRows) {
+      const status = normalizeStatus(group.status);
+      statusMap[status] = (statusMap[status] || 0) + Number(group.n || 0);
+      if (isErrorStatus(group.status)) {
+        summary.errors += Number(group.n || 0);
+        const errKey = `${group.provider}|${group.model}`;
+        const errItem = bumpAnalyticsMap(providerModelErrorMap, errKey, {
+          error: true,
+          meta: { provider: group.provider, model: group.model },
+        });
+        errItem.errors = (errItem.errors || 0) + Number(group.n || 0) - 1;
+      }
+    }
+  }
+
+  const providerBreakdown = Object.values(providerMap)
+    .map((p) => ({
+      ...p,
+      costSharePct: summary.cost > 0 ? (p.cost / summary.cost) * 100 : 0,
+      errorRate: p.requests > 0 ? (p.errors / p.requests) * 100 : 0,
+    }))
+    .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens);
+
+  const topModels = Object.values(modelMap)
+    .map((m) => ({ ...m, errorRate: m.requests > 0 ? (m.errors / m.requests) * 100 : 0 }))
+    .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens)
+    .slice(0, 20);
+
+  const topConnections = Object.values(connectionAgg)
+    .map((c) => ({ ...c, errorRate: c.requests > 0 ? (c.errors / c.requests) * 100 : 0 }))
+    .sort((a, b) => b.cost - a.cost || b.tokens - a.tokens)
+    .slice(0, 20);
+
+  const detailRows = db.all(
+    `SELECT provider, model, status, data FROM requestDetails WHERE timestamp >= ? AND timestamp <= ? ORDER BY timestamp DESC LIMIT 500`,
+    [start.toISOString(), end.toISOString()],
+  );
+  const latencyByProvider = {};
+  for (const row of detailRows) {
+    const data = row.data ? parseJson(row.data, {}) : {};
+    const provider = row.provider || data.provider || "unknown";
+    latencyByProvider[provider] ||= { provider, ttft: [], total: [], errors: 0, requests: 0 };
+    const item = latencyByProvider[provider];
+    item.requests += 1;
+    if ((row.status || data.status) === "error") item.errors += 1;
+    if (Number.isFinite(data.latency?.ttft)) item.ttft.push(data.latency.ttft);
+    if (Number.isFinite(data.latency?.total)) item.total.push(data.latency.total);
+  }
+
+  const latency = Object.values(latencyByProvider)
+    .map((p) => ({
+      provider: p.provider,
+      requests: p.requests,
+      errorRate: p.requests > 0 ? (p.errors / p.requests) * 100 : 0,
+      ttftP50: percentile(p.ttft, 50),
+      ttftP95: percentile(p.ttft, 95),
+      totalP50: percentile(p.total, 50),
+      totalP95: percentile(p.total, 95),
+    }))
+    .sort((a, b) => b.requests - a.requests)
+    .slice(0, 12);
+
+  const worstPairs = Object.values(providerModelErrorMap)
+    .map((p) => ({ ...p, errorRate: p.requests > 0 ? (p.errors / p.requests) * 100 : 0 }))
+    .filter((p) => p.errors > 0 || p.errorRate > 0)
+    .sort((a, b) => b.errorRate - a.errorRate || b.errors - a.errors)
+    .slice(0, 12);
+
+  return {
+    period,
+    generatedAt: new Date().toISOString(),
+    summary: {
+      ...summary,
+      avgCostPerRequest: summary.requests > 0 ? summary.cost / summary.requests : 0,
+      errorRate: summary.requests > 0 ? (summary.errors / summary.requests) * 100 : 0,
+    },
+    velocity,
+    providerBreakdown,
+    topModels,
+    topConnections,
+    latency,
+    errors: {
+      statuses: Object.entries(statusMap).map(([status, count]) => ({ status, count })).sort((a, b) => b.count - a.count),
+      worstPairs,
+    },
+  };
+}
+
 function formatLogDate(date = new Date()) {
   const pad = (n) => String(n).padStart(2, "0");
   return `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
