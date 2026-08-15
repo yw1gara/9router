@@ -36,11 +36,18 @@ const handlers = {
 // ── SSL / SNI ─────────────────────────────────────────────────
 
 const certCache = new Map();
+const CERT_CACHE_MAX = 500;
 let rootCAPem;
 
 function sniCallback(servername, cb) {
   try {
-    if (certCache.has(servername)) return cb(null, certCache.get(servername));
+    if (certCache.has(servername)) {
+      // Refresh recency so the most-recently-used certs survive the cap.
+      const ctx = certCache.get(servername);
+      certCache.delete(servername);
+      certCache.set(servername, ctx);
+      return cb(null, ctx);
+    }
     const certData = getCertForDomain(servername);
     if (!certData) return cb(new Error(`Failed to generate cert for ${servername}`));
     const ctx = require("tls").createSecureContext({
@@ -48,6 +55,11 @@ function sniCallback(servername, cb) {
       cert: `${certData.cert}\n${rootCAPem}`
     });
     certCache.set(servername, ctx);
+    // Evict oldest entries beyond the cap (Map preserves insertion order).
+    while (certCache.size > CERT_CACHE_MAX) {
+      const oldest = certCache.keys().next().value;
+      certCache.delete(oldest);
+    }
     cb(null, ctx);
   } catch (e) {
     err(`SNI error for ${servername}: ${e.message}`);
