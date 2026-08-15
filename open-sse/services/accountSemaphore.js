@@ -128,15 +128,17 @@ export function acquire(semaphoreKey, options = {}) {
     }, timeoutMs);
     if (typeof timer.unref === "function") timer.unref();
 
+    let onAbort = null;
     if (signal) {
-      signal.addEventListener?.("abort", () => {
+      onAbort = () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         const idx = gate.queue.indexOf(entry);
         if (idx >= 0) gate.queue.splice(idx, 1);
         reject(signal.reason || new Error("Aborted"));
-      });
+      };
+      signal.addEventListener?.("abort", onAbort, { once: true });
     }
 
     const entry = {
@@ -144,6 +146,7 @@ export function acquire(semaphoreKey, options = {}) {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener?.("abort", onAbort);
         resolve(release);
       },
       reject: (err) => {

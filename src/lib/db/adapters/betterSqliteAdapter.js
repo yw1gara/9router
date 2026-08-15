@@ -32,11 +32,20 @@ export function createBetterSqliteAdapter(filePath) {
     try { db.close(); } catch {}
   }
 
-  // Ensure WAL is flushed and -wal/-shm files removed on shutdown
+  // Ensure WAL is flushed and -wal/-shm files removed on shutdown.
+  // SIGINT/SIGTERM exit after a short grace period so async shutdown handlers
+  // registered elsewhere (e.g. the request-details write buffer flush) can
+  // drain before the process dies. The timer is unref'd — if the event loop
+  // empties first the process exits naturally.
   const onShutdown = () => gracefulClose();
+  const exitAfterGrace = () => {
+    onShutdown();
+    const t = setTimeout(() => process.exit(0), 500);
+    t.unref?.();
+  };
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  process.once("SIGINT", exitAfterGrace);
+  process.once("SIGTERM", exitAfterGrace);
 
   return {
     driver: "better-sqlite3",

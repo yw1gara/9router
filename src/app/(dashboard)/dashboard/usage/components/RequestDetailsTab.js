@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useDeferredValue } from "react";
 import Card from "@/shared/components/Card";
 import Button from "@/shared/components/Button";
 import Drawer from "@/shared/components/Drawer";
@@ -118,6 +118,9 @@ export default function RequestDetailsTab() {
     endDate: ""
   });
   const requestSeq = useRef(0);
+  // Delay filter-driven refetches: date inputs fire onChange per keystroke, so
+  // the deferred value absorbs rapid typing into a single fetch.
+  const deferredFilters = useDeferredValue(filters);
 
   const fetchProviders = useCallback(async () => {
     try {
@@ -140,9 +143,9 @@ export default function RequestDetailsTab() {
         page: pagination.page.toString(),
         pageSize: pagination.pageSize.toString()
       });
-      if (filters.provider) params.append("provider", filters.provider);
-      if (filters.startDate) params.append("startDate", filters.startDate);
-      if (filters.endDate) params.append("endDate", filters.endDate);
+      if (deferredFilters.provider) params.append("provider", deferredFilters.provider);
+      if (deferredFilters.startDate) params.append("startDate", deferredFilters.startDate);
+      if (deferredFilters.endDate) params.append("endDate", deferredFilters.endDate);
 
       const res = await fetch(`/api/usage/request-details?${params}`);
       const data = await res.json();
@@ -155,7 +158,7 @@ export default function RequestDetailsTab() {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [pagination.page, pagination.pageSize, filters]);
+  }, [pagination.page, pagination.pageSize, deferredFilters]);
 
   useEffect(() => {
     fetchProviders();

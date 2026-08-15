@@ -31,9 +31,14 @@ export async function createBunSqliteAdapter(filePath) {
     try { db.close(); } catch {}
   }
   const onShutdown = () => gracefulClose();
+  const exitAfterGrace = () => {
+    onShutdown();
+    const t = setTimeout(() => process.exit(0), 500);
+    t.unref?.();
+  };
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  process.once("SIGINT", exitAfterGrace);
+  process.once("SIGTERM", exitAfterGrace);
 
   return {
     driver: "bun:sqlite",

@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { DEFAULT_PLUGINS, LOCAL_STDIO_PLUGINS, buildManagedMcpServers } from "@/shared/constants/coworkPlugins";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { assertPublicUrl } from "@/shared/utils/ssrfGuard";
 
 const APP_PORT = UPDATER_CONFIG.appPort;
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
@@ -184,6 +185,9 @@ const buildCustomEntries = (customPlugins) => {
   const out = [];
   for (const p of customPlugins) {
     if (!p?.name || !p?.url) continue;
+    // Custom MCP endpoints are user-supplied URLs — block internal/private
+    // hosts (SSRF) before persisting them into the managed config.
+    try { assertPublicUrl(p.url); } catch { continue; }
     out.push({ name: p.name, url: p.url, transport: p.transport || "sse", custom: true });
   }
   return out;

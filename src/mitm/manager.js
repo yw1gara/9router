@@ -811,6 +811,7 @@ async function stopServer(sudoPassword) {
 
   try { fs.unlinkSync(PID_FILE); } catch { /* ignore */ }
   try { fs.unlinkSync(LOCK_FILE); } catch { /* ignore */ }
+  setCachedPassword(null);
   await saveMitmSettings(false, null);
   mitmIsRestarting = false;
 
