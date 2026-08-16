@@ -161,6 +161,7 @@ export default function ModelAvailabilityBadge() {
                         return (
                           <div
                             key={`${m.provider}-${m.model}`}
+                            title={m.lastError ? `${m.provider}/${m.model}: ${m.lastError}` : `${m.provider}/${m.model}`}
                             className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-surface/30"
                           >
                     <div className="flex items-center gap-1.5 min-w-0">

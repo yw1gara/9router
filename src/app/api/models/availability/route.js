@@ -35,6 +35,7 @@ export async function GET() {
           connectionId: connection.id,
           connectionName: connection.name || connection.email || connection.id,
           lastError: connection.lastError || null,
+          lastErrorAt: connection.lastErrorAt || null,
         });
       }
 
@@ -46,7 +47,20 @@ export async function GET() {
           connectionId: connection.id,
           connectionName: connection.name || connection.email || connection.id,
           lastError: connection.lastError || null,
+          lastErrorAt: connection.lastErrorAt || null,
         });
+      }
+
+      // Best-effort purge of expired lock keys so stale entries don't
+      // accumulate in the DB (clearAccountError only cleans them lazily on
+      // the connection's next successful request, which may never come).
+      const expired = Object.entries(connection)
+        .filter(([key, value]) => key.startsWith(MODEL_LOCK_PREFIX) && value && new Date(value).getTime() <= Date.now())
+        .map(([key]) => key);
+      if (expired.length > 0) {
+        try {
+          await updateProviderConnection(connection.id, Object.fromEntries(expired.map((key) => [key, null])));
+        } catch { /* purge is best-effort */ }
       }
     }
 
