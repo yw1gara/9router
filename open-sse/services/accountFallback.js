@@ -382,9 +382,11 @@ export function isModelAccessDeniedError(status, errorText) {
   if (!text && !status) return false;
 
   // Only HTTP statuses that providers use for model-access/subscription denials
-  // are accepted. 401 (auth) and 429 (rate-limit) and 5xx are NEVER model-access
-  // — they are handled by their own ERROR_RULES / checkFallbackError path.
-  if (![400, 402, 403, 404, 405, 415, 451].includes(Number(status))) return false;
+  // are accepted. 401 (auth) and 429 (rate-limit) are NEVER model-access.
+  // 503/425 are included because OrcaRouter returns model_not_found as 503
+  // ("not available for your account") and model_not_yet_available as 425 —
+  // for these the TEXT patterns below must still match (no status auto-true).
+  if (![400, 402, 403, 404, 405, 415, 425, 451, 503].includes(Number(status))) return false;
 
   // Status-based: 404 model-not-found / deployment-not-found
   if (Number(status) === 404) return true;
@@ -398,6 +400,9 @@ export function isModelAccessDeniedError(status, errorText) {
     "model is not available",
     "model_not_allowed",
     "model not allowed",
+    "model is not yet available",
+    "model_not_yet_available",
+    "model is not available for your account",
     "deployment not found",
     "deployment_not_found",
     "model not supported",
@@ -463,6 +468,18 @@ export function applyComboTargetExhaustion(provider, connectionId, model, status
   if (model && isModelAccessDeniedError(status, errorText)) {
     sets.exhaustedProviders.add(`${provider}:${model}`);
     log?.info?.("COMBO", `Provider ${provider} model ${model} access denied (${status}) — excluding only this model, connection stays eligible`);
+    return false;
+  }
+
+  // OrcaRouter free-tier 429 (code free_rate_limited): either a rate window
+  // (Retry-After header) or a per-request prompt cap. Retrying the SAME
+  // model+prompt inside this request is pointless in both cases — skip the
+  // model for the rest of the request without punishing the account (paid
+  // models on the same key still work; account cooldown is handled
+  // separately by markAccountUnavailable).
+  if (Number(status) === 429 && /free_rate_limited/i.test(errorText)) {
+    if (model) sets.exhaustedProviders.add(`${provider}:${model}`);
+    log?.info?.("COMBO", `Provider ${provider} model ${model || "*"} free-tier 429 (free_rate_limited) — excluding model for this request`);
     return false;
   }
 

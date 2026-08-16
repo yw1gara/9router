@@ -23,4 +23,11 @@ export const FILTERS = {
     (Array.isArray(models) ? models : [])
       .filter((m) => m.id?.startsWith("mimo") || m.name?.toLowerCase().includes("mimo"))
       .map((m) => ({ id: m.id, name: m.name || m.id })),
+
+  // OrcaRouter: free ids are "-free" suffixed shadows of paid models plus the
+  // orcarouter/free router id (docs: the /v1/models catalog is the source of truth)
+  "orcarouter-free": (models) =>
+    (Array.isArray(models) ? models : [])
+      .filter((m) => m.id === "orcarouter/free" || m.id?.endsWith("-free"))
+      .map((m) => ({ id: m.id, name: m.name || m.id })),
 };
