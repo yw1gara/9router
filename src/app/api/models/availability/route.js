@@ -89,7 +89,11 @@ export async function GET() {
 
     return NextResponse.json({
       models,
-      unavailableCount: models.length,
+      // Distinct semantics: cooldown = per-model locks with live countdowns;
+      // unavailable = account-level failures (no model lock, no timer).
+      cooldownCount: models.filter((m) => m.status === "cooldown").length,
+      unavailableCount: models.filter((m) => m.status === "unavailable").length,
+      totalCount: models.length,
     });
   } catch (error) {
     console.error("[API] Failed to get model availability:", error);

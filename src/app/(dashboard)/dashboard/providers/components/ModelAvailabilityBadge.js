@@ -93,8 +93,9 @@ export default function ModelAvailabilityBadge() {
   if (loading) return null;
 
   const models = data?.models || [];
-  const unavailableCount = data?.unavailableCount || models.filter((m) => m.status !== "available").length;
-  const isHealthy = unavailableCount === 0;
+  const cooldownCount = data?.cooldownCount ?? models.filter((m) => m.status === "cooldown").length;
+  const unavailableCount = data?.unavailableCount ?? models.filter((m) => m.status === "unavailable").length;
+  const isHealthy = cooldownCount === 0 && unavailableCount === 0;
 
   // Group unhealthy models by provider
   const byProvider = {};
@@ -120,7 +121,10 @@ export default function ModelAvailabilityBadge() {
         </span>
         {isHealthy
           ? "All models operational"
-          : `${unavailableCount} model${unavailableCount !== 1 ? "s" : ""} in cooldown`}
+          : [
+              cooldownCount > 0 ? `${cooldownCount} model${cooldownCount !== 1 ? "s" : ""} cooling down` : null,
+              unavailableCount > 0 ? `${unavailableCount} account${unavailableCount !== 1 ? "s" : ""} unavailable` : null,
+            ].filter(Boolean).join(" · ")}
       </button>
 
       {expanded && (
@@ -158,26 +162,39 @@ export default function ModelAvailabilityBadge() {
                       {provModels.map((m) => {
                         const status = STATUS_CONFIG[m.status] || STATUS_CONFIG.unknown;
                         const isClearing = clearing === `${m.provider}:${m.model}`;
+                        const isAccountWide = m.model === "__all";
+                        const label = isAccountWide ? "All models" : m.model;
                         return (
                           <div
                             key={`${m.provider}-${m.model}`}
-                            title={m.lastError ? `${m.provider}/${m.model}: ${m.lastError}` : `${m.provider}/${m.model}`}
+                            title={
+                              isAccountWide
+                                ? `Account-level error — every model on this account failed last time: ${m.lastError || "unknown error"}`
+                                : m.lastError
+                                  ? `${m.provider}/${m.model}: ${m.lastError}`
+                                  : `${m.provider}/${m.model}`
+                            }
                             className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-surface/30"
                           >
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span
-                        className="material-symbols-outlined text-[14px] shrink-0"
-                        style={{ color: status.color }}
-                      >
-                        {status.icon}
-                      </span>
-                      <span className="font-mono text-xs text-text-main truncate">{m.model}</span>
-                      {m.until && new Date(m.until).getTime() > now && (
-                        <span className="font-mono text-[10px] text-orange-500 shrink-0" title={`Cooldown until ${new Date(m.until).toLocaleString()}`}>
-                          ⏱ {formatRemaining(new Date(m.until).getTime() - now)}
-                        </span>
-                      )}
-                    </div>
+                            <div className="flex items-center gap-1.5 min-w-0">
+                              <span
+                                className="material-symbols-outlined text-[14px] shrink-0"
+                                style={{ color: status.color }}
+                              >
+                                {status.icon}
+                              </span>
+                              <span className="font-mono text-xs text-text-main truncate">
+                                {label}
+                                {isAccountWide && (
+                                  <span className="ml-1 font-sans text-[10px] text-text-muted">(account error)</span>
+                                )}
+                              </span>
+                              {m.until && new Date(m.until).getTime() > now && (
+                                <span className="font-mono text-[10px] text-orange-500 shrink-0" title={`Cooldown until ${new Date(m.until).toLocaleString()}`}>
+                                  ⏱ {formatRemaining(new Date(m.until).getTime() - now)}
+                                </span>
+                              )}
+                            </div>
                             {m.status === "cooldown" && (
                               <Button
                                 size="sm"
