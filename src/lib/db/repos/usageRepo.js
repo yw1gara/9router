@@ -829,8 +829,9 @@ export async function getUsageAnalytics(period = "7d") {
   const { start, end } = periodWindow(period);
   const useRawRows = period === "today" || period === "24h";
 
-  const [{ getProviderConnections }] = await Promise.all([
+  const [{ getProviderConnections }, { getProviderNodes }] = await Promise.all([
     import("./connectionsRepo.js"),
+    import("./nodesRepo.js"),
   ]);
 
   let allConnections = [];
@@ -845,6 +846,16 @@ export async function getUsageAnalytics(period = "7d") {
       authType: c.authType,
     };
   }
+
+  // Custom providers (openai-compatible-*) have opaque internal ids — display
+  // their user-defined name from providerNodes instead (e.g. "Routers9").
+  const providerNames = {};
+  try {
+    for (const n of await getProviderNodes()) {
+      if (n?.id && n.name) providerNames[n.id] = n.name;
+    }
+  } catch { /* labels are cosmetic — raw ids still work */ }
+  const labelProvider = (providerId) => providerNames[providerId] || providerId;
 
   const bucketCfg = analyticsBucketConfig(period, end);
   const velocity = Array.from({ length: bucketCfg.count }, (_, i) => {
@@ -903,7 +914,7 @@ export async function getUsageAnalytics(period = "7d") {
         if (isError) velocity[idx].errors += 1;
       }
 
-      const provider = row.provider || "unknown";
+      const provider = labelProvider(row.provider || "unknown");
       bumpAnalyticsMap(providerMap, provider, { ...tokenInfo, cost, error: isError, meta: { provider } });
 
       const modelKey = `${row.model || "unknown"}|${provider}`;
@@ -923,7 +934,7 @@ export async function getUsageAnalytics(period = "7d") {
         meta: {
           connectionId: connId,
           name: conn?.name || (connId === "local-no-account" ? "Local / no account" : `Account ${String(connId).slice(0, 8)}`),
-          provider: conn?.provider || provider,
+          provider: labelProvider(conn?.provider || provider),
           isActive: conn?.isActive ?? null,
           authType: conn?.authType || null,
         },
@@ -989,13 +1000,14 @@ export async function getUsageAnalytics(period = "7d") {
       summary.cost += tokenInfo.cost;
 
       for (const [provider, values] of Object.entries(day.byProvider || {})) {
+        const providerLabel = labelProvider(provider);
         const tokenInfoP = tokensFromDayValues(values);
-        bumpAnalyticsMap(providerMap, provider, { ...tokenInfoP, requests: values.requests, cost: values.cost || 0, error: false, meta: { provider } });
+        bumpAnalyticsMap(providerMap, providerLabel, { ...tokenInfoP, requests: values.requests, cost: values.cost || 0, error: false, meta: { provider: providerLabel } });
       }
 
       for (const [modelKey, values] of Object.entries(day.byModel || {})) {
         const rawModel = values.rawModel || String(modelKey).split("|")[0] || "unknown";
-        const provider = values.provider || String(modelKey).split("|")[1] || "unknown";
+        const provider = labelProvider(values.provider || String(modelKey).split("|")[1] || "unknown");
         const tokenInfoM = tokensFromDayValues(values);
         bumpAnalyticsMap(modelMap, `${rawModel}|${provider}`, {
           ...tokenInfoM,
@@ -1008,7 +1020,7 @@ export async function getUsageAnalytics(period = "7d") {
 
       for (const [connectionId, values] of Object.entries(day.byAccount || {})) {
         const conn = connectionMap[connectionId];
-        const provider = conn?.provider || values.provider || "unknown";
+        const provider = labelProvider(conn?.provider || values.provider || "unknown");
         const tokenInfoC = tokensFromDayValues(values);
         bumpAnalyticsMap(connectionAgg, connectionId, {
           ...tokenInfoC,
@@ -1041,10 +1053,11 @@ export async function getUsageAnalytics(period = "7d") {
       statusMap[status] = (statusMap[status] || 0) + Number(group.n || 0);
       if (isErrorStatus(group.status)) {
         summary.errors += Number(group.n || 0);
-        const errKey = `${group.provider}|${group.model}`;
+        const providerLabel = labelProvider(group.provider);
+        const errKey = `${providerLabel}|${group.model}`;
         const errItem = bumpAnalyticsMap(providerModelErrorMap, errKey, {
           error: true,
-          meta: { provider: group.provider, model: group.model },
+          meta: { provider: providerLabel, model: group.model },
         });
         errItem.errors = (errItem.errors || 0) + Number(group.n || 0) - 1;
       }
@@ -1076,7 +1089,7 @@ export async function getUsageAnalytics(period = "7d") {
   const latencyByProvider = {};
   for (const row of detailRows) {
     const data = row.data ? parseJson(row.data, {}) : {};
-    const provider = row.provider || data.provider || "unknown";
+    const provider = labelProvider(row.provider || data.provider || "unknown");
     latencyByProvider[provider] ||= { provider, ttft: [], total: [], errors: 0, requests: 0 };
     const item = latencyByProvider[provider];
     item.requests += 1;
