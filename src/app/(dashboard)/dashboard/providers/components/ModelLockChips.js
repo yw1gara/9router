@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import PropTypes from "prop-types";
 
 const MODEL_LOCK_PREFIX = "modelLock_";
@@ -12,28 +12,35 @@ function formatRemaining(ms) {
   return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
 }
 
+function activeLocks(connection, now) {
+  return Object.entries(connection || {})
+    .filter(([k, v]) => k.startsWith(MODEL_LOCK_PREFIX) && v && new Date(v).getTime() > now)
+    .sort(([, a], [, b]) => new Date(a) - new Date(b));
+}
+
 /**
  * ModelLockChips — per-model cooldown chips for a connection.
  *
- * modelLock_<model> keys are MODEL-SCOPED locks: a denied/rate-limited model
- * quarantines only that model on this account — sibling models stay usable.
+ * modelLock_<model> keys are MODEL-SCOPED locks: a denied model only
+ * quarantines that model on that account — sibling models stay usable.
  * Each chip shows the locked model name plus a live countdown to expiry.
  * "modelLock___all" (account-wide lock) renders as an "all models" chip.
+ *
+ * The 1s ticker is armed ONLY while at least one lock is active and clears
+ * itself when the last lock expires — rows without cooldowns never tick.
  */
 export default function ModelLockChips({ connection }) {
-  const [, forceTick] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
+  const locks = useMemo(() => activeLocks(connection, now), [connection, now]);
+  const hasLocks = locks.length > 0;
 
   useEffect(() => {
-    const t = setInterval(() => forceTick((v) => v + 1), 1000);
+    if (!hasLocks) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(t);
-  }, []);
+  }, [hasLocks]);
 
-  const now = Date.now();
-  const locks = Object.entries(connection || {})
-    .filter(([k, v]) => k.startsWith(MODEL_LOCK_PREFIX) && v && new Date(v).getTime() > now)
-    .sort(([, a], [, b]) => new Date(a) - new Date(b));
-
-  if (locks.length === 0) return null;
+  if (!hasLocks) return null;
 
   return (
     <span className="inline-flex flex-wrap items-center gap-1">

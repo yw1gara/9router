@@ -42,14 +42,21 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
     .map(([, v]) => v).filter(Boolean).sort()[0] || null;
 
   useEffect(() => {
+    let t = null;
     const check = () => {
       const until = Object.entries(connection)
         .filter(([k]) => k.startsWith("modelLock_"))
         .map(([, v]) => v).filter(v => v && new Date(v).getTime() > Date.now()).sort()[0] || null;
       setIsCooldown(!!until);
+      // Self-clear: stop ticking once no lock is active (stale expired keys
+      // would otherwise keep this interval alive forever at 1 Hz).
+      if (!until && t) {
+        clearInterval(t);
+        t = null;
+      }
     };
     check();
-    const t = modelLockUntil ? setInterval(check, 1000) : null;
+    if (modelLockUntil) t = setInterval(check, 1000);
     return () => { if (t) clearInterval(t); };
   }, [modelLockUntil]);
 

@@ -3,6 +3,7 @@ import {
   getProviderConnections,
   updateProviderConnection,
   getProviderNodes,
+  getProviderConnectionById,
 } from "@/lib/localDb";
 
 const MODEL_LOCK_PREFIX = "modelLock_";
@@ -66,12 +67,22 @@ export async function GET() {
       // Best-effort purge of expired lock keys so stale entries don't
       // accumulate in the DB (clearAccountError only cleans them lazily on
       // the connection's next successful request, which may never come).
+      // Re-read the row right before writing: the snapshot above may be
+      // milliseconds stale, and nulling a key that markAccountUnavailable
+      // just re-armed would erase a fresh cooldown.
       const expired = Object.entries(connection)
         .filter(([key, value]) => key.startsWith(MODEL_LOCK_PREFIX) && value && new Date(value).getTime() <= Date.now())
         .map(([key]) => key);
       if (expired.length > 0) {
         try {
-          await updateProviderConnection(connection.id, Object.fromEntries(expired.map((key) => [key, null])));
+          const fresh = await getProviderConnectionById(connection.id);
+          const stillExpired = expired.filter((key) => {
+            const v = fresh?.[key];
+            return v && new Date(v).getTime() <= Date.now();
+          });
+          if (stillExpired.length > 0) {
+            await updateProviderConnection(connection.id, Object.fromEntries(stillExpired.map((key) => [key, null])));
+          }
         } catch { /* purge is best-effort */ }
       }
     }

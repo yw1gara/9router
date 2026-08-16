@@ -1055,14 +1055,18 @@ export async function getUsageAnalytics(period = "7d") {
       const status = normalizeStatus(group.status);
       statusMap[status] = (statusMap[status] || 0) + Number(group.n || 0);
       if (isErrorStatus(group.status)) {
-        summary.errors += Number(group.n || 0);
+        const n = Number(group.n || 0);
+        summary.errors += n;
         const providerLabel = labelProvider(group.provider);
         const errKey = `${providerLabel}|${group.model}`;
+        // n rows are ALL error rows for this pair — requests must match so
+        // errorRate is not inflated (requests defaults to 1 per group).
         const errItem = bumpAnalyticsMap(providerModelErrorMap, errKey, {
+          requests: n,
           error: true,
           meta: { provider: providerLabel, model: group.model },
         });
-        errItem.errors = (errItem.errors || 0) + Number(group.n || 0) - 1;
+        errItem.errors = (errItem.errors || 0) + n - 1;
       }
     }
   }

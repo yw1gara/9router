@@ -131,7 +131,7 @@ function getRefreshLockKey(provider, credentials) {
   return `${provider}:${stableId}`;
 }
 
-export async function withCredentialRefreshLock(provider, credentials, refreshFn, getCurrentCredentials) {
+export async function withCredentialRefreshLock(provider, credentials, refreshFn, getCurrentCredentials, isRefreshStillNeeded) {
   const key = getRefreshLockKey(provider, credentials);
   const existing = refreshLocks.get(key);
   if (existing) return existing;
@@ -142,10 +142,15 @@ export async function withCredentialRefreshLock(provider, credentials, refreshFn
       // persisted rotated tokens between our snapshot and lock acquisition.
       // Refreshing again with the consumed (rotating) refresh token would
       // yield invalid_grant and can mark a healthy connection as auth_failed.
+      // isRefreshStillNeeded lets forced callers (background scheduler, larger
+      // lead) bypass the re-check so proactive refreshes are not neutered.
       if (getCurrentCredentials) {
         try {
           const latest = await getCurrentCredentials();
-          if (latest && !shouldRefreshCredentials(provider, latest)) {
+          const stillNeeded = isRefreshStillNeeded
+            ? isRefreshStillNeeded(latest)
+            : shouldRefreshCredentials(provider, latest);
+          if (latest && !stillNeeded) {
             const pick = {
               accessToken: latest.accessToken,
               apiKey: latest.apiKey,
@@ -170,11 +175,11 @@ export async function withCredentialRefreshLock(provider, credentials, refreshFn
   return pending;
 }
 
-export async function refreshProviderCredentials(provider, credentials, log, getCurrentCredentials) {
+export async function refreshProviderCredentials(provider, credentials, log, getCurrentCredentials, isRefreshStillNeeded) {
   if (!credentials) return null;
 
   return withCredentialRefreshLock(provider, credentials, async () => {
     const refreshed = await refreshTokenByProvider(provider, credentials, log);
     return mergeRefreshedCredentials(provider, credentials, refreshed);
-  }, getCurrentCredentials);
+  }, getCurrentCredentials, isRefreshStillNeeded);
 }

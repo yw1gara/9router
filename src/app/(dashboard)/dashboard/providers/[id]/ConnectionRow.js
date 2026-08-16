@@ -96,6 +96,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     .sort()[0] || null;
 
   useEffect(() => {
+    let interval = null;
     const checkCooldown = () => {
       const until = Object.entries(connection)
         .filter(([k]) => k.startsWith("modelLock_"))
@@ -103,10 +104,16 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
         .filter(v => v && new Date(v).getTime() > Date.now())
         .sort()[0] || null;
       setIsCooldown(!!until);
+      // Self-clear: stop ticking once no lock is active (stale expired keys
+      // would otherwise keep this interval alive forever at 1 Hz).
+      if (!until && interval) {
+        clearInterval(interval);
+        interval = null;
+      }
     };
 
     checkCooldown();
-    const interval = modelLockUntil ? setInterval(checkCooldown, 1000) : null;
+    if (modelLockUntil) interval = setInterval(checkCooldown, 1000);
     return () => {
       if (interval) clearInterval(interval);
     };

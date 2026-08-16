@@ -240,10 +240,13 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
     // getCurrentCredentials: lets the refresh lock re-read the persisted row
     // after acquisition, so a concurrent refresh's rotated tokens are reused
     // instead of refreshing again with this (possibly consumed) snapshot.
+    // The predicate keeps force=true (background scheduler, larger lead)
+    // authoritative — the re-check must not cancel a forced proactive refresh.
     const getCurrentCredentials = creds.connectionId
       ? async () => getProviderConnectionById(creds.connectionId)
       : null;
-    const newCreds = await _refreshProviderCredentials(provider, creds, log, getCurrentCredentials);
+    const isRefreshStillNeeded = (latest) => Boolean(force) || _shouldRefreshCredentials(provider, latest || creds);
+    const newCreds = await _refreshProviderCredentials(provider, creds, log, getCurrentCredentials, isRefreshStillNeeded);
     if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,
