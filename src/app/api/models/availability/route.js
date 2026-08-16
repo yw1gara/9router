@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import {
   getProviderConnections,
   updateProviderConnection,
+  getProviderNodes,
 } from "@/lib/localDb";
 
 const MODEL_LOCK_PREFIX = "modelLock_";
@@ -21,14 +22,24 @@ function getActiveModelLocks(connection) {
 
 export async function GET() {
   try {
-    const connections = await getProviderConnections();
+    const [connections, providerNodes] = await Promise.all([
+      getProviderConnections(),
+      getProviderNodes().catch(() => []),
+    ]);
+    // Custom providers carry opaque internal ids — show their display name.
+    const providerNames = {};
+    for (const n of providerNodes) {
+      if (n?.id && n.name) providerNames[n.id] = n.name;
+    }
     const models = [];
 
     for (const connection of connections) {
+      const providerLabel = providerNames[connection.provider] || connection.provider;
       const locks = getActiveModelLocks(connection);
       for (const lock of locks) {
         models.push({
-          provider: connection.provider,
+          provider: providerLabel,
+          providerId: connection.provider,
           model: lock.model,
           status: "cooldown",
           until: lock.until,
@@ -41,7 +52,8 @@ export async function GET() {
 
       if (locks.length === 0 && connection.testStatus === "unavailable") {
         models.push({
-          provider: connection.provider,
+          provider: providerLabel,
+          providerId: connection.provider,
           model: "__all",
           status: "unavailable",
           connectionId: connection.id,
@@ -85,7 +97,18 @@ export async function POST(request) {
       return NextResponse.json({ error: "Invalid request" }, { status: 400 });
     }
 
-    const connections = await getProviderConnections({ provider });
+    // The client may send the display label (custom providers) or the raw id —
+    // resolve labels back to the internal provider id before filtering.
+    let providerId = provider;
+    let connections = await getProviderConnections({ provider });
+    if (connections.length === 0) {
+      const nodes = await getProviderNodes().catch(() => []);
+      const node = nodes.find((n) => n.name === provider);
+      if (node) {
+        providerId = node.id;
+        connections = await getProviderConnections({ provider: providerId });
+      }
+    }
     const lockKey = `${MODEL_LOCK_PREFIX}${model}`;
 
     await Promise.all(

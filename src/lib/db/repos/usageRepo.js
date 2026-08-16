@@ -460,12 +460,15 @@ export async function getUsageStats(period = "all") {
       stats.totalRequests += day.requests || 0;
 
       for (const [prov, p] of Object.entries(day.byProvider || {})) {
-        if (!stats.byProvider[prov]) stats.byProvider[prov] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
-        stats.byProvider[prov].requests += p.requests || 0;
-        stats.byProvider[prov].promptTokens += p.promptTokens || 0;
-        stats.byProvider[prov].completionTokens += p.completionTokens || 0;
-        stats.byProvider[prov].cachedTokens += p.cachedTokens || 0;
-        stats.byProvider[prov].cost += p.cost || 0;
+        // Label custom-provider keys with their display name (e.g. "Routers9")
+        // so every provider list shows names, not openai-compatible-* ids.
+        const provKey = providerNodeNameMap[prov] || prov;
+        if (!stats.byProvider[provKey]) stats.byProvider[provKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
+        stats.byProvider[provKey].requests += p.requests || 0;
+        stats.byProvider[provKey].promptTokens += p.promptTokens || 0;
+        stats.byProvider[provKey].completionTokens += p.completionTokens || 0;
+        stats.byProvider[provKey].cachedTokens += p.cachedTokens || 0;
+        stats.byProvider[provKey].cost += p.cost || 0;
       }
 
       for (const [mk, m] of Object.entries(day.byModel || {})) {
