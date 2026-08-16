@@ -395,6 +395,9 @@ export function isModelAccessDeniedError(status, errorText) {
     "model_not_found",
     "model does not exist",
     "does not exist",
+    "model is not available",
+    "model_not_allowed",
+    "model not allowed",
     "deployment not found",
     "deployment_not_found",
     "model not supported",
@@ -452,6 +455,17 @@ export function isProviderExhaustedReason(result) {
  */
 export function applyComboTargetExhaustion(provider, connectionId, model, status, errorText, sets, log) {
   if (!provider || !sets) return false;
+
+  // Model-access denials (e.g. 403 "model_not_allowed") are MODEL-scoped:
+  // mark only provider:model so sibling models on the SAME connection remain
+  // eligible for the rest of the request. Must be checked BEFORE the generic
+  // 401/403 auth branch, which would wrongly exhaust the whole account.
+  if (model && isModelAccessDeniedError(status, errorText)) {
+    sets.exhaustedProviders.add(`${provider}:${model}`);
+    log?.info?.("COMBO", `Provider ${provider} model ${model} access denied (${status}) — excluding only this model, connection stays eligible`);
+    return false;
+  }
+
   const isAuthError = status === 401 || status === 403;
   const isConnectionError = [408, 500, 502, 503, 504, 524].includes(status);
 
