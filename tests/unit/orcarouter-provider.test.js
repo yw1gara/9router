@@ -59,6 +59,15 @@ describe("OrcaRouter error semantics", () => {
     expect(isModelAccessDeniedError(425, "model_not_yet_available")).toBe(true);
   });
 
+  it("transient overloaded 503 with generic model text is NOT a model denial", () => {
+    // "Model is not available right now, please retry" on a 503 under load is a
+    // transient outage — it must stay in the connection/transient path, not
+    // trigger a 5-minute model quarantine.
+    expect(isModelAccessDeniedError(503, "Model is not available right now, please retry")).toBe(false);
+    expect(isModelAccessDeniedError(503, "The deployment does not exist")).toBe(false);
+    expect(isModelAccessDeniedError(425, "upgrade your plan")).toBe(false);
+  });
+
   it("503 model_not_found exhausts only the model, not the connection", () => {
     const sets = freshSets();
     applyComboTargetExhaustion(

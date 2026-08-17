@@ -391,6 +391,14 @@ export function isModelAccessDeniedError(status, errorText) {
   // Status-based: 404 model-not-found / deployment-not-found
   if (Number(status) === 404) return true;
 
+  // For 503/425 ONLY match OrcaRouter's precise codes — generic phrases like
+  // "model is not available right now, please retry" on an overloaded 503 are
+  // transient outages, not account-level model denials, and must not trigger
+  // a 5-minute model quarantine.
+  if (Number(status) === 503 || Number(status) === 425) {
+    return /model_not_found|model_not_yet_available|not available for your account/i.test(text);
+  }
+
   // Text-based patterns for 400/402/403/405/415/451 bodies
   const MODEL_ACCESS_DENIED_PATTERNS = [
     "model not found",
