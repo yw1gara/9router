@@ -220,7 +220,7 @@ export default function ProvidersPage() {
     setConnections((prev) =>
       prev.map((c) => (matches(c) ? { ...c, isActive: newActive } : c)),
     );
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       providerConns.map((c) =>
         fetch(`/api/providers/${c.id}`, {
           method: "PUT",
@@ -229,6 +229,18 @@ export default function ProvidersPage() {
         }),
       ),
     );
+    const failedIds = providerConns
+      .filter((_, index) => {
+        const result = results[index];
+        return result.status === "rejected" || !result.value?.ok;
+      })
+      .map((c) => c.id);
+    if (failedIds.length > 0) {
+      setConnections((prev) => prev.map((c) => (
+        failedIds.includes(c.id) ? { ...c, isActive: !newActive } : c
+      )));
+      notify.error(`${failedIds.length} provider connection update${failedIds.length === 1 ? "" : "s"} failed`);
+    }
   };
 
   const handleBatchTest = async (mode, providerId = null) => {

@@ -15,7 +15,7 @@ const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
 
 // In-memory state shared across Next.js modules
-if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {}, byApiKey: {} };
+if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {}, byApiKey: {}, apiKeyAccounts: {} };
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
 if (!global._statsEmitter) {
   global._statsEmitter = new EventEmitter();
@@ -178,6 +178,22 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
     if (Object.keys(pendingRequests.byApiKey[apiKeyKey]).length === 0) delete pendingRequests.byApiKey[apiKeyKey];
   }
 
+  // Track which connection owns this masked key so Live activity can show the
+  // human account name instead of the raw masked key.
+  if (connectionId && apiKeyKey !== "local-no-key") {
+    if (!pendingRequests.apiKeyAccounts[apiKeyKey]) pendingRequests.apiKeyAccounts[apiKeyKey] = {};
+    pendingRequests.apiKeyAccounts[apiKeyKey][connectionId] = Math.max(
+      0,
+      (pendingRequests.apiKeyAccounts[apiKeyKey][connectionId] || 0) + (started ? 1 : -1),
+    );
+    if (pendingRequests.apiKeyAccounts[apiKeyKey][connectionId] === 0) {
+      delete pendingRequests.apiKeyAccounts[apiKeyKey][connectionId];
+    }
+    if (Object.keys(pendingRequests.apiKeyAccounts[apiKeyKey]).length === 0) {
+      delete pendingRequests.apiKeyAccounts[apiKeyKey];
+    }
+  }
+
   if (started) {
     clearTimeout(pendingTimers[timerKey]);
     pendingTimers[timerKey] = setTimeout(() => {
@@ -251,8 +267,12 @@ export async function getActiveRequests() {
     for (const [modelKey, count] of Object.entries(models)) {
       if (count > 0) {
         const match = modelKey.match(/^(.*) \((.*)\)$/);
+        const ownerIds = pendingRequests.apiKeyAccounts?.[apiKey] || {};
+        const keyNames = Object.keys(ownerIds).map((id) => connectionMap[id] || `Account ${id.slice(0, 8)}...`);
+        const keyName = keyNames.length > 0 ? keyNames.join(", ") : "Unknown key";
         activeApiKeys.push({
           apiKey,
+          keyName,
           model: match ? match[1] : modelKey,
           provider: match ? match[2] : "unknown",
           count,
@@ -621,6 +641,7 @@ export async function getUsageStats(period = "all") {
       stats.totalCompletionTokens += completionTokens;
       stats.totalCachedTokens += cachedTokens;
       stats.totalCost += entryCost;
+      stats.totalRequests += 1;
 
       if (!stats.byProvider[r.provider]) stats.byProvider[r.provider] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
       stats.byProvider[r.provider].requests++;
@@ -685,10 +706,10 @@ export async function getUsageStats(period = "all") {
     }
   }
 
-  // daily-summary path accumulates totalRequests from day.requests (includes
-  // providerless rows); live-history path derives it from byProvider.
-  if (!useDailySummary) {
-    stats.totalRequests = Object.values(stats.byProvider).reduce((sum, p) => sum + (p.requests || 0), 0);
+  // Both paths count every usage row, including providerless rows. The live
+  // history path increments totalRequests while iterating raw rows above.
+  if (useDailySummary) {
+    stats.totalRequests = stats.totalRequests || 0;
   }
   return stats;
 }

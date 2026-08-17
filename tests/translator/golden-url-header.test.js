@@ -23,15 +23,30 @@ const SPECIALIZED = new Set([
   "xiaomi-tokenplan", "mimo-free",
 ]);
 
-// Sanitize header: khử token + field thời gian động (kimi X-Msh-Device-Id) để snapshot ổn định.
+// Sanitize header: khử token + field động (version, platform, hostname, device id)
+// để snapshot ổn định lintas mesin — buildClineHeaders/buildKimiHeaders inject
+// process.platform / process.version / hostname / package version.
+const ENV_FIELDS = new Set([
+  "X-PLATFORM-VERSION",
+  "X-CLIENT-VERSION",
+  "X-CORE-VERSION",
+  "X-Msh-Version",
+  "X-Msh-Device-Name",
+  "X-Msh-Device-Model",
+]);
+const ENV_PLATFORM = new Set(["X-PLATFORM"]);
+
 function sanitize(headers) {
   const out = {};
   for (const [k, v] of Object.entries(headers)) {
-    out[k] = typeof v === "string"
-      ? v.replace(/Bearer .+/, "Bearer <TOK>")
-          .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
-          .replace(/kimi-\d{10,}/g, "kimi-<TS>")
-      : v;
+    if (typeof v !== "string") { out[k] = v; continue; }
+    let s = v.replace(/Bearer .+/, "Bearer <TOK>")
+        .replace(/sk-test-APIKEY|tok-test-ACCESS/g, "<CRED>")
+        .replace(/kimi-\d{10,}/g, "kimi-<TS>")
+        .replace(/9Router\/\d+\.\d+\.\d+/, "9Router/<VER>");
+    if (ENV_FIELDS.has(k)) s = "<ENV>";
+    else if (ENV_PLATFORM.has(k)) s = "<PLATFORM>";
+    out[k] = s;
   }
   return out;
 }

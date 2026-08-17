@@ -89,8 +89,8 @@ export default function OverviewCards({ stats }) {
               {activeCount > 0 ? `${activeCount} request${activeCount === 1 ? "" : "s"} in flight` : "No requests in flight"}
             </p>
             {activeKeys.length > 0 && (
-              <p className="truncate text-[11px] text-text-muted" title={activeKeys.map((k) => k.apiKey).join(", ")}>
-                Keys: {activeKeys.slice(0, 2).map((k) => `${k.apiKey} (${k.count})`).join(", ")}{activeKeys.length > 2 ? ` +${activeKeys.length - 2} more` : ""}
+              <p className="truncate text-[11px] text-text-muted" title={activeKeys.map((k) => k.keyName || k.apiKey).join(", ")}>
+                Keys: {activeKeys.slice(0, 2).map((k) => `${k.keyName || k.apiKey} (${k.count})`).join(", ")}{activeKeys.length > 2 ? ` +${activeKeys.length - 2} more` : ""}
               </p>
             )}
           </div>
