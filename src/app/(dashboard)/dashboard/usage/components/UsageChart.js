@@ -31,25 +31,32 @@ export default function UsageChart({ period = "7d" }) {
   const fetchData = useCallback(async () => {
     const seq = ++requestSeq.current;
     setLoading(true);
+    setData([]); // Never render the previous period as if it were current.
     try {
-      const res = await fetch(`/api/usage/chart?period=${period}`);
-      if (res.ok) {
-        const json = await res.json();
-        if (seq !== requestSeq.current) return;
-        setData(json);
-      }
+      const res = await fetch(`/api/usage/chart?period=${encodeURIComponent(period)}`);
+      if (!res.ok) throw new Error(`Chart request failed (${res.status})`);
+      const json = await res.json();
+      if (seq !== requestSeq.current) return;
+      // The route returns an array. Treat malformed/error payloads as empty
+      // rather than letting data.some() crash the Usage page.
+      setData(Array.isArray(json) ? json : Array.isArray(json?.data) ? json.data : []);
     } catch (e) {
-      console.error("Failed to fetch chart data:", e);
+      if (seq === requestSeq.current) {
+        setData([]);
+        console.error("Failed to fetch chart data:", e);
+      }
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
   }, [period]);
 
+  const chartData = Array.isArray(data) ? data : [];
+
   useEffect(() => {
     fetchData();
   }, [fetchData]);
 
-  const hasData = data.some((d) => d.tokens > 0 || d.cost > 0);
+  const hasData = chartData.some((d) => Number(d?.tokens) > 0 || Number(d?.cost) > 0);
 
   return (
     <Card className="flex min-w-0 flex-col gap-3 p-3 sm:p-4">
@@ -74,7 +81,7 @@ export default function UsageChart({ period = "7d" }) {
         <div className="h-48 flex items-center justify-center text-text-muted text-sm">No data for this period</div>
       ) : (
         <ResponsiveContainer width="100%" height={220}>
-          <AreaChart data={data} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
+          <AreaChart data={chartData} margin={{ top: 4, right: 8, left: 0, bottom: 0 }}>
             <defs>
               <linearGradient id="gradTokens" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#6366f1" stopOpacity={0.25} />
