@@ -6,6 +6,12 @@ import Card from "@/shared/components/Card";
 const fmt = (n) => new Intl.NumberFormat().format(Number(n) || 0);
 const fmtCost = (n) => `$${(Number(n) || 0).toFixed(2)}`;
 const fmtRate = (n) => `${(Number(n) || 0).toFixed(1)}%`;
+const fmtTokens = (n) => {
+  const v = Number(n) || 0;
+  if (v >= 1e6) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e3) return `${(v / 1e3).toFixed(1)}K`;
+  return String(v);
+};
 
 function getTopEntry(map, field = "requests") {
   return Object.values(map || {}).sort((a, b) => (Number(b[field]) || 0) - (Number(a[field]) || 0))[0] || null;
@@ -56,6 +62,8 @@ export default function OverviewCards({ stats }) {
   const providerCount = Object.keys(stats.byProvider || {}).length;
   const topModel = getTopEntry(stats.byModel);
   const topKey = getTopEntry(stats.byApiKey);
+  const topKeyTokens = topKey ? (Number(topKey.promptTokens) || 0) + (Number(topKey.completionTokens) || 0) : 0;
+  const activeKeys = Array.isArray(stats.activeApiKeys) ? stats.activeApiKeys : [];
   const cacheRate = input > 0 ? (cached / input) * 100 : 0;
   const avgTokens = requests > 0 ? Math.round(totalTokens / requests) : 0;
 
@@ -75,11 +83,31 @@ export default function OverviewCards({ stats }) {
       <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-3">
         <Card className="flex min-w-0 items-center gap-3 border-primary/20 bg-primary/5 px-4 py-3">
           <span className="material-symbols-outlined text-primary">monitoring</span>
-          <div className="min-w-0"><p className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Live activity</p><p className="truncate text-sm font-medium text-text-main">{activeCount > 0 ? `${activeCount} request${activeCount === 1 ? "" : "s"} in flight` : "No requests in flight"}</p></div>
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Live activity</p>
+            <p className="truncate text-sm font-medium text-text-main">
+              {activeCount > 0 ? `${activeCount} request${activeCount === 1 ? "" : "s"} in flight` : "No requests in flight"}
+            </p>
+            {activeKeys.length > 0 && (
+              <p className="truncate text-[11px] text-text-muted" title={activeKeys.map((k) => k.apiKey).join(", ")}>
+                Keys: {activeKeys.slice(0, 2).map((k) => `${k.apiKey} (${k.count})`).join(", ")}{activeKeys.length > 2 ? ` +${activeKeys.length - 2} more` : ""}
+              </p>
+            )}
+          </div>
         </Card>
         <Card className="flex min-w-0 items-center gap-3 px-4 py-3">
           <span className="material-symbols-outlined text-warning">key</span>
-          <div className="min-w-0"><p className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Top API key</p><p className="truncate text-sm font-medium text-text-main" title={topKey?.keyName || "No API key usage"}>{topKey?.keyName || "No API key usage"}{topKey ? ` · ${fmt(topKey.requests)} requests` : ""}</p></div>
+          <div className="min-w-0">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-text-muted">Top API key</p>
+            <p className="truncate text-sm font-medium text-text-main" title={topKey?.keyName || "No API key usage"}>
+              {topKey?.keyName || "No API key usage"}
+            </p>
+            {topKey && (
+              <p className="truncate text-[11px] text-text-muted">
+                {fmt(topKey.requests)} req · {fmtTokens(topKeyTokens)} tokens
+              </p>
+            )}
+          </div>
         </Card>
         <Card className="flex min-w-0 items-center gap-3 px-4 py-3">
           <span className="material-symbols-outlined text-success">check_circle</span>

@@ -15,7 +15,7 @@ const CONN_CACHE_TTL_MS = 30 * 1000;
 const PERIOD_MS = { "24h": 86400000, "7d": 604800000, "30d": 2592000000, "60d": 5184000000 };
 
 // In-memory state shared across Next.js modules
-if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {} };
+if (!global._pendingRequests) global._pendingRequests = { byModel: {}, byAccount: {}, byApiKey: {} };
 if (!global._lastErrorProvider) global._lastErrorProvider = { provider: "", ts: 0 };
 if (!global._statsEmitter) {
   global._statsEmitter = new EventEmitter();
@@ -149,9 +149,10 @@ async function calculateCost(provider, model, tokens) {
   }
 }
 
-export function trackPendingRequest(model, provider, connectionId, started, error = false) {
+export function trackPendingRequest(model, provider, connectionId, started, error = false, apiKey = null) {
   const modelKey = provider ? `${model} (${provider})` : model;
   const timerKey = `${connectionId}|${modelKey}`;
+  const apiKeyKey = maskApiKey(apiKey) || "local-no-key";
 
   if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
   pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + (started ? 1 : -1));
@@ -169,6 +170,14 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
     }
   }
 
+  if (!pendingRequests.byApiKey[apiKeyKey]) pendingRequests.byApiKey[apiKeyKey] = {};
+  if (!pendingRequests.byApiKey[apiKeyKey][modelKey]) pendingRequests.byApiKey[apiKeyKey][modelKey] = 0;
+  pendingRequests.byApiKey[apiKeyKey][modelKey] = Math.max(0, pendingRequests.byApiKey[apiKeyKey][modelKey] + (started ? 1 : -1));
+  if (pendingRequests.byApiKey[apiKeyKey][modelKey] === 0) {
+    delete pendingRequests.byApiKey[apiKeyKey][modelKey];
+    if (Object.keys(pendingRequests.byApiKey[apiKeyKey]).length === 0) delete pendingRequests.byApiKey[apiKeyKey];
+  }
+
   if (started) {
     clearTimeout(pendingTimers[timerKey]);
     pendingTimers[timerKey] = setTimeout(() => {
@@ -176,6 +185,9 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
       if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0;
       if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
         pendingRequests.byAccount[connectionId][modelKey] = 0;
+      }
+      if (pendingRequests.byApiKey[apiKeyKey]?.[modelKey] > 0) {
+        pendingRequests.byApiKey[apiKeyKey][modelKey] = 0;
       }
       scheduleStatsEvent("pending");
     }, PENDING_TIMEOUT_MS);
@@ -234,8 +246,23 @@ export async function getActiveRequests() {
     })
     .slice(0, 20);
 
+  const activeApiKeys = [];
+  for (const [apiKey, models] of Object.entries(pendingRequests.byApiKey || {})) {
+    for (const [modelKey, count] of Object.entries(models)) {
+      if (count > 0) {
+        const match = modelKey.match(/^(.*) \((.*)\)$/);
+        activeApiKeys.push({
+          apiKey,
+          model: match ? match[1] : modelKey,
+          provider: match ? match[2] : "unknown",
+          count,
+        });
+      }
+    }
+  }
+
   const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
-  return { activeRequests, recentRequests, errorProvider };
+  return { activeRequests, activeApiKeys, recentRequests, errorProvider };
 }
 
 export async function saveRequestUsage(entry) {
