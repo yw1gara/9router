@@ -445,20 +445,24 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
 }
 
 async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null) {
+  // Every probe gets a hard deadline — one hanging upstream must not stall
+  // the whole One-by-One run (or a single Test button) for minutes.
+  const opts = { ...options, signal: options.signal || AbortSignal.timeout(15_000) };
+
   // Vercel relay: forward via relay URL
   if (effectiveProxy?.vercelRelayUrl) {
     const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
-    return proxyAwareFetch(url, options, {
+    return proxyAwareFetch(url, opts, {
       vercelRelayUrl: effectiveProxy.vercelRelayUrl,
     });
   }
 
   if (!effectiveProxy?.connectionProxyEnabled || !effectiveProxy?.connectionProxyUrl) {
-    return fetch(url, options);
+    return fetch(url, opts);
   }
 
   const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
-  return proxyAwareFetch(url, options, {
+  return proxyAwareFetch(url, opts, {
     connectionProxyEnabled: true,
     connectionProxyUrl: effectiveProxy.connectionProxyUrl,
     connectionNoProxy: effectiveProxy.connectionNoProxy || "",

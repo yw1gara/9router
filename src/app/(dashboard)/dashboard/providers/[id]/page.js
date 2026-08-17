@@ -23,7 +23,8 @@ import EditCompatibleNodeModal from "./EditCompatibleNodeModal";
 import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 
-const ONE_BY_ONE_DELAY_MS = 1000;
+const ONE_BY_ONE_DELAY_MS = 250;
+const ONE_BY_ONE_TIMEOUT_MS = 20_000;
 
 const AUTO_PING_SETTINGS_KEYS = {
   claude: "claudeAutoPing",
@@ -649,7 +650,15 @@ export default function ProviderDetailPage() {
         }));
 
         try {
-          const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), ONE_BY_ONE_TIMEOUT_MS);
+          let res;
+          try {
+            res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST", signal: controller.signal });
+          } finally {
+            clearTimeout(timeout);
+          }
+          if (!res.ok) throw new Error(`Test failed (${res.status})`);
           const data = await res.json();
           const valid = !!data.valid;
 
