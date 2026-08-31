@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
@@ -24,7 +24,73 @@ import AddCustomModelModal from "./AddCustomModelModal";
 import BulkImportCodexModal from "./BulkImportCodexModal";
 import BulkImportGrokCliModal from "./BulkImportGrokCliModal";
 
-const ONE_BY_ONE_DELAY_MS = 1000;
+const ONE_BY_ONE_DELAY_MS = 250;
+const ONE_BY_ONE_TIMEOUT_MS = 20_000;
+const RECOVERY_PROVIDER_IDS = new Set([
+  "orcarouter",
+  "opencode-zen",
+  "tokenrouter",
+]);
+
+function getConnectionProviderData(connection) {
+  const value = connection?.providerSpecificData;
+  if (!value) return {};
+  if (typeof value === "object") return value;
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+  return {};
+}
+
+function hasActiveModelLock(connection) {
+  const now = Date.now();
+  return Object.entries(connection || {}).some(
+    ([key, value]) => key.startsWith("modelLock_") && value && new Date(value).getTime() > now,
+  );
+}
+
+function isAutoUnavailableConnection(connection) {
+  const data = getConnectionProviderData(connection);
+  return (
+    connection?.isActive === false &&
+    Boolean(data.autoRecoveryDisabled || data.autoQuotaDisabled)
+  );
+}
+
+function connectionStatusRank(connection) {
+  if (isAutoUnavailableConnection(connection)) return 3;
+  if (connection?.isActive === false) return 2;
+  if (hasActiveModelLock(connection) || connection?.testStatus === "unavailable") return 1;
+  return 0;
+}
+
+function getActiveModelLockCount(connection) {
+  return Object.entries(connection || {}).filter(
+    ([key, value]) => key.startsWith("modelLock_") && value && new Date(value).getTime() > Date.now(),
+  ).length;
+}
+
+function getSortableConnectionName(connection) {
+  return (
+    connection?.displayName?.trim()
+    || connection?.name?.trim()
+    || connection?.email?.trim()
+    || connection?.id
+    || ""
+  ).toLowerCase();
+}
+
+function getLockedModelGroup(connection) {
+  return Object.keys(connection || {})
+    .filter((key) => key.startsWith("modelLock_") && connection[key] && new Date(connection[key]).getTime() > Date.now())
+    .map((key) => key.slice("modelLock_".length).toLowerCase())
+    .sort()[0] || "";
+}
 
 const AUTO_PING_SETTINGS_KEYS = {
   claude: "claudeAutoPing",
@@ -41,6 +107,7 @@ export default function ProviderDetailPage() {
   const providerId = params.id;
   const { getCaps } = useModelCaps();
   const [connections, setConnections] = useState([]);
+  const [connectionSort, setConnectionSort] = useState("status");
   const [loading, setLoading] = useState(true);
   const [providerNode, setProviderNode] = useState(null);
   const [proxyPools, setProxyPools] = useState([]);
@@ -65,9 +132,14 @@ export default function ProviderDetailPage() {
   const [bulkProxyPoolId, setBulkProxyPoolId] = useState("__none__");
   const [bulkUpdatingProxy, setBulkUpdatingProxy] = useState(false);
   const [providerStrategy, setProviderStrategy] = useState(null);
+  const [providerProxyApply, setProviderProxyApply] = useState(null);
   const [providerStickyLimit, setProviderStickyLimit] = useState("");
   const [thinkingMode, setThinkingMode] = useState("auto");
   const [autoPing, setAutoPing] = useState({ enabled: false, connections: {} });
+  const [recoverySettings, setRecoverySettings] = useState(null);
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
+  const [recoverySaving, setRecoverySaving] = useState(false);
+  const [recoveryError, setRecoveryError] = useState("");
   const [suggestedModels, setSuggestedModels] = useState([]);
   const [liveModels, setLiveModels] = useState([]);
   const [kiloFreeModels, setKiloFreeModels] = useState([]);
@@ -315,6 +387,7 @@ export default function ProviderDetailPage() {
       const override = (settingsData.providerStrategies || {})[providerId] || {};
       setProviderStrategy(override.fallbackStrategy || null);
       setProviderStickyLimit(override.stickyRoundRobinLimit != null ? String(override.stickyRoundRobinLimit) : "1");
+      setProviderProxyApply(override.proxyApply || null);
       // Load per-provider thinking config
       const thinkingCfg = (settingsData.providerThinking || {})[providerId] || {};
       setThinkingMode(thinkingCfg.mode || "auto");
@@ -345,6 +418,67 @@ export default function ProviderDetailPage() {
       setLoading(false);
     }
   }, [providerId, isCompatible]);
+
+  useEffect(() => {
+    if (!RECOVERY_PROVIDER_IDS.has(providerId)) return undefined;
+
+    const controller = new AbortController();
+    const run = async () => {
+      setRecoveryLoading(true);
+      setRecoveryError("");
+      try {
+        const response = await fetch(`/api/settings/provider-recovery/${providerId}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          throw new Error(data.error || "Failed to load recovery settings");
+        }
+        setRecoverySettings(data.settings || data.config || data.recovery || data);
+      } catch (error) {
+        if (error.name !== "AbortError") setRecoveryError(error.message);
+      } finally {
+        if (!controller.signal.aborted) setRecoveryLoading(false);
+      }
+    };
+    run();
+
+    return () => controller.abort();
+  }, [providerId]);
+  const updateRecoverySettings = async (patch) => {
+    if (recoverySaving) return;
+    const previous = recoverySettings || {};
+    const next = {
+      enabled: previous.enabled === true,
+      intervalMinutes: Number.isInteger(previous.intervalMinutes) ? previous.intervalMinutes : 15,
+      applyProxy: previous.applyProxy === true,
+      ...patch,
+    };
+    setRecoverySettings(next);
+    setRecoverySaving(true);
+    setRecoveryError("");
+    try {
+      const response = await fetch(
+        `/api/settings/provider-recovery/${providerId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(next),
+        },
+      );
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to save recovery settings");
+      }
+      setRecoverySettings(data.settings || data.config || data.recovery || next);
+    } catch (error) {
+      setRecoverySettings(previous);
+      setRecoveryError(error.message);
+    } finally {
+      setRecoverySaving(false);
+    }
+  };
 
   const handleUpdateNode = async (formData) => {
     try {
@@ -379,9 +513,15 @@ export default function ProviderDetailPage() {
 
       const updated = { ...current };
       if (Object.keys(override).length === 0) {
-        delete updated[providerId];
+        // Remove only the strategy keys; keep other provider-level overrides
+        // (e.g. proxyApply) intact.
+        if (current[providerId]) {
+          const { fallbackStrategy, stickyRoundRobinLimit, ...rest } = current[providerId];
+          if (Object.keys(rest).length > 0) updated[providerId] = rest;
+          else delete updated[providerId];
+        }
       } else {
-        updated[providerId] = override;
+        updated[providerId] = { ...current[providerId], ...override };
       }
 
       await fetch("/api/settings", {
@@ -613,6 +753,32 @@ export default function ProviderDetailPage() {
     }
   };
 
+  const [testingConnectionIds, setTestingConnectionIds] = useState(() => new Set());
+
+  const handleTestConnection = async (connectionId) => {
+    setTestingConnectionIds((prev) => new Set(prev).add(connectionId));
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ONE_BY_ONE_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch(`/api/providers/${connectionId}/test`, { method: "POST", signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+      if (!res.ok) throw new Error(`Test failed (${res.status})`);
+    } catch (error) {
+      console.log("Error testing connection:", error);
+    } finally {
+      await fetchConnections();
+      setTestingConnectionIds((prev) => {
+        const next = new Set(prev);
+        next.delete(connectionId);
+        return next;
+      });
+    }
+  };
+
   const handleRunOneByOneTest = async () => {
     if (oneByOneRunning || connections.length === 0) return;
 
@@ -651,7 +817,15 @@ export default function ProviderDetailPage() {
         }));
 
         try {
-          const res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST" });
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), ONE_BY_ONE_TIMEOUT_MS);
+          let res;
+          try {
+            res = await fetch(`/api/providers/${connection.id}/test`, { method: "POST", signal: controller.signal });
+          } finally {
+            clearTimeout(timeout);
+          }
+          if (!res.ok) throw new Error(`Test failed (${res.status})`);
           const data = await res.json();
           const valid = !!data.valid;
 
@@ -900,16 +1074,16 @@ export default function ProviderDetailPage() {
     setBulkUpdatingProxy(true);
     try {
       let failed = 0;
-      for (const { connectionId, proxyPoolId } of assignments) {
+      for (const assignment of assignments) {
         try {
-          const res = await fetch(`/api/providers/${connectionId}`, {
+          const res = await fetch(`/api/providers/${assignment.connectionId}`, {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ proxyPoolId }),
+            body: JSON.stringify(assignment.body ?? { proxyPoolId: assignment.proxyPoolId }),
           });
           if (!res.ok) failed += 1;
         } catch (e) {
-          console.log("Error applying proxy for", connectionId, e);
+          console.log("Error applying proxy for", assignment.connectionId, e);
           failed += 1;
         }
       }
@@ -921,7 +1095,31 @@ export default function ProviderDetailPage() {
     }
   };
 
+  // Provider-level proxy default: applies to every current AND future account
+  // of this provider, with the live pool inventory (new pools join automatically).
+  const saveProviderProxyApply = async (proxyApply) => {
+    try {
+      const settingsRes = await fetch("/api/settings", { cache: "no-store" });
+      const settingsData = settingsRes.ok ? await settingsRes.json() : {};
+      const current = settingsData.providerStrategies || {};
+      const updated = {
+        ...current,
+        [providerId]: { ...current[providerId], proxyApply },
+      };
+      await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ providerStrategies: updated }),
+      });
+    } catch (error) {
+      console.log("Error saving provider proxy default:", error);
+    }
+  };
+
   const handleApplySinglePool = (proxyPoolId) => {
+    // Provider-level fixed default (covers new accounts), plus per-connection
+    // stamps for dashboard display.
+    saveProviderProxyApply(proxyPoolId ? { strategy: "fixed", poolId: proxyPoolId } : null);
     const targets = connections.map((c) => ({ connectionId: c.id, proxyPoolId }));
     return applyProxyAssignments(targets);
   };
@@ -932,6 +1130,9 @@ export default function ProviderDetailPage() {
       alert("No active proxy pools available.");
       return;
     }
+    // One-to-one is an explicit per-connection assignment — clear the
+    // provider-level default so it does not override it.
+    saveProviderProxyApply(null);
     const targets = connections.map((c, i) => ({
       connectionId: c.id,
       proxyPoolId: activePools[i % activePools.length].id,
@@ -939,13 +1140,79 @@ export default function ProviderDetailPage() {
     return applyProxyAssignments(targets);
   };
 
+  const handleApplySmart = () => {
+    const poolIds = proxyPools.filter((p) => p.isActive === true && p.proxyUrl).map((p) => p.id);
+    if (poolIds.length === 0) {
+      alert("No active proxy pools available.");
+      return;
+    }
+    // Provider-level smart default: every account (incl. new ones) rotates
+    // across the LIVE pool inventory (incl. new pools).
+    saveProviderProxyApply({ strategy: "smart" });
+    const targets = connections.map((c) => ({
+      connectionId: c.id,
+      body: { proxyPoolIds: poolIds, proxyRotationStrategy: "smart" },
+    }));
+    return applyProxyAssignments(targets);
+  };
+
 
   const isSelected = (connectionId) => selectedConnectionIds.includes(connectionId);
 
+  const CONNECTION_SORT_MODES = {
+    status: "Status",
+    name: "Name",
+    models_available: "Most available models",
+    models_exhausted: "Most exhausted models",
+  };
+
+  const displayConnections = useMemo(
+    () => [...connections].sort((a, b) => {
+      if (connectionSort === "name") {
+        const nameDelta = getSortableConnectionName(a).localeCompare(getSortableConnectionName(b));
+        if (nameDelta !== 0) return nameDelta;
+      }
+      if (connectionSort === "models_available" || connectionSort === "models_exhausted") {
+        const aLocked = getActiveModelLockCount(a);
+        const bLocked = getActiveModelLockCount(b);
+        const aAvailable = Math.max(0, (a.modelCount ?? 0) - aLocked);
+        const bAvailable = Math.max(0, (b.modelCount ?? 0) - bLocked);
+        const aGroup = getLockedModelGroup(a);
+        const bGroup = getLockedModelGroup(b);
+        if (connectionSort === "models_available") {
+          const delta = bAvailable - aAvailable;
+          if (delta !== 0) return delta;
+        } else {
+          // Most exhausted models: group by exhausted model name (deepseek together, qwen together)
+          if (Boolean(aGroup) !== Boolean(bGroup)) {
+            return aGroup ? -1 : 1; // Locked accounts first
+          }
+          const groupDelta = aGroup.localeCompare(bGroup);
+          if (groupDelta !== 0) return groupDelta;
+          const delta = bLocked - aLocked;
+          if (delta !== 0) return delta;
+        }
+      }
+      const statusDelta = connectionStatusRank(a) - connectionStatusRank(b);
+      if (statusDelta !== 0) return statusDelta;
+      const nameDelta = getSortableConnectionName(a).localeCompare(getSortableConnectionName(b));
+      if (nameDelta !== 0) return nameDelta;
+      return (a.priority ?? 0) - (b.priority ?? 0);
+    }),
+    [connections, connectionSort],
+  );
+
+  const priorityIndexByConnectionId = useMemo(
+    () => new Map(connections.map((connection, index) => [connection.id, index])),
+    [connections],
+  );
+
   const connectionsList = (
     <div className="flex min-w-0 flex-col divide-y divide-black/[0.03] dark:divide-white/[0.03]">
-      {connections
-        .map((conn, index) => (
+      {displayConnections
+        .map((conn, index) => {
+          const priorityIndex = priorityIndexByConnectionId.get(conn.id) ?? index;
+          return (
           <div key={conn.id} className="flex min-w-0 items-stretch">
             <div className="flex shrink-0 items-center pl-1 sm:pl-2">
               <input
@@ -959,11 +1226,19 @@ export default function ProviderDetailPage() {
               <ConnectionRow
                 connection={conn}
                 proxyPools={proxyPools}
+                providerProxyApply={providerProxyApply}
+                livePoolCount={proxyPools.filter((p) => p.isActive === true && p.proxyUrl).length}
                 isOAuth={isOAuth}
-                isFirst={index === 0}
-                isLast={index === connections.length - 1}
-                onMoveUp={() => handleSwapPriority(index, index - 1)}
-                onMoveDown={() => handleSwapPriority(index, index + 1)}
+                isFirst={
+                  priorityIndex === 0 ||
+                  connectionStatusRank(connections[priorityIndex - 1]) !== connectionStatusRank(conn)
+                }
+                isLast={
+                  priorityIndex === connections.length - 1 ||
+                  connectionStatusRank(connections[priorityIndex + 1]) !== connectionStatusRank(conn)
+                }
+                onMoveUp={() => handleSwapPriority(priorityIndex, priorityIndex - 1)}
+                onMoveDown={() => handleSwapPriority(priorityIndex, priorityIndex + 1)}
                 onToggleActive={(isActive) => handleUpdateConnectionStatus(conn.id, isActive)}
                 autoPing={AUTO_PING_SETTINGS_KEYS[providerId] && conn.authType === "oauth" ? {
                   on: autoPing.connections[conn.id] === true,
@@ -978,16 +1253,42 @@ export default function ProviderDetailPage() {
                       body: JSON.stringify({ proxyPoolId: proxyPoolId || null }),
                     });
                     if (res.ok) {
-                      setConnections(prev => prev.map(c =>
-                        c.id === conn.id
-                          ? { ...c, providerSpecificData: { ...c.providerSpecificData, proxyPoolId: proxyPoolId || null } }
-                          : c
-                      ));
+                      setConnections(prev => prev.map(c => {
+                        if (c.id !== conn.id) return c;
+                        const psd = { ...c.providerSpecificData, proxyPoolId: proxyPoolId || null };
+                        // Switching to a single pool/None exits multi-pool mode
+                        // (server clears it too — keep local state in sync).
+                        delete psd.proxyPoolIds;
+                        delete psd.proxyRotationStrategy;
+                        return { ...c, providerSpecificData: psd };
+                      }));
                     }
                   } catch (error) {
                     console.log("Error updating proxy:", error);
                   }
                 }}
+                onAssignSmartPools={async () => {
+                  try {
+                    const poolIds = proxyPools.filter((p) => p.isActive && p.proxyUrl).map((p) => p.id);
+                    if (poolIds.length === 0) return;
+                    const res = await fetch(`/api/providers/${conn.id}`, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ proxyPoolIds: poolIds, proxyRotationStrategy: "smart" }),
+                    });
+                    if (res.ok) {
+                      setConnections(prev => prev.map(c =>
+                        c.id === conn.id
+                          ? { ...c, providerSpecificData: { ...c.providerSpecificData, proxyPoolIds: poolIds, proxyRotationStrategy: "smart" } }
+                          : c
+                      ));
+                    }
+                  } catch (error) {
+                    console.log("Error assigning smart pools:", error);
+                  }
+                }}
+                onTest={() => handleTestConnection(conn.id)}
+                testing={testingConnectionIds.has(conn.id)}
                 onEdit={() => {
                   setSelectedConnection(conn);
                   setShowEditModal(true);
@@ -997,7 +1298,8 @@ export default function ProviderDetailPage() {
               />
             </div>
           </div>
-        ))}
+          );
+        })}
     </div>
   );
 
@@ -1018,6 +1320,15 @@ export default function ProviderDetailPage() {
           >
             <span className="material-symbols-outlined text-text-muted text-[18px]">sync_alt</span>
             <span className="text-sm text-text-main">One-to-one (rotate)</span>
+          </button>
+          <button
+            onClick={handleApplySmart}
+            disabled={bulkUpdatingProxy || activePools.length === 0}
+            title="Each account keeps its own proxy from all active pools; auto-rotates to a healthy pool when the assigned one fails"
+            className="flex items-center gap-2 rounded-lg px-3 py-2 text-left transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <span className="material-symbols-outlined text-text-muted text-[18px]">auto_awesome</span>
+            <span className="text-sm text-text-main">Smart (auto per account)</span>
           </button>
           <button
             onClick={() => handleApplySinglePool(null)}
@@ -1070,6 +1381,58 @@ export default function ProviderDetailPage() {
     } finally {
       setTestingModelIds((prev) => { const n = new Set(prev); n.delete(modelId); return n; });
     }
+  };
+
+  // Test one model against EVERY active account of this provider (pinned
+  // per-account server-side); results render under the model row.
+  const [modelAllTests, setModelAllTests] = useState({});
+  const [testingAllIds, setTestingAllIds] = useState(() => new Set());
+  const stopAllTestsRef = useRef(new Set()); // modelIds the user asked to STOP
+  const handleStopAllAccounts = (modelId) => stopAllTestsRef.current.add(modelId);
+  const handleTestAllAccounts = async (modelId) => {
+    if (testingAllIds.has(modelId)) return;
+    const targets = connections.filter((c) => c.isActive !== false);
+    if (targets.length === 0) return;
+    setTestingAllIds((prev) => new Set(prev).add(modelId));
+    stopAllTestsRef.current.delete(modelId);
+
+    const full = `${providerStorageAlias}/${modelId}`;
+    let results = [];
+    // Initialize the panel: every account starts as "queued".
+    setModelAllTests((prev) => ({
+      ...prev,
+      [modelId]: { total: targets.length, okCount: 0, results, queue: targets, currentId: null, running: true },
+    }));
+
+    // Sequential, in the SAME ORDER as the account list on this page, so the
+    // live panel always shows which account is being tested right now.
+    for (const c of targets) {
+      if (stopAllTestsRef.current.has(modelId)) break; // user pressed STOP
+      setModelAllTests((prev) => ({
+        ...prev,
+        [modelId]: { total: targets.length, okCount: results.filter((r) => r.ok).length, results: [...results], queue: targets, currentId: c.id, running: true },
+      }));
+      let r;
+      try {
+        const res = await fetch("/api/models/test", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ model: full, connectionId: c.id }),
+        });
+        const data = await res.json();
+        r = { connectionId: c.id, name: c.displayName || c.name || c.email || c.id.slice(0, 8), ok: !!data.ok, latencyMs: data.latencyMs ?? null, error: data.error || null };
+      } catch (e) {
+        r = { connectionId: c.id, name: c.displayName || c.name || c.email || c.id.slice(0, 8), ok: false, latencyMs: null, error: e?.message || "Network error" };
+      }
+      results = [...results, r];
+    }
+
+    setModelAllTests((prev) => ({
+      ...prev,
+      [modelId]: { total: targets.length, okCount: results.filter((x) => x.ok).length, results, queue: targets, currentId: null, running: false, stopped: stopAllTestsRef.current.has(modelId) },
+    }));
+    stopAllTestsRef.current.delete(modelId);
+    setTestingAllIds((prev) => { const n = new Set(prev); n.delete(modelId); return n; });
   };
 
   const renderModelsSection = () => {
@@ -1129,6 +1492,10 @@ export default function ProviderDetailPage() {
             }}
             testStatus={modelTestResults[model.id]}
             onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+            onTestAll={connections.length > 0 ? () => handleTestAllAccounts(model.id) : undefined}
+            onStopAll={() => handleStopAllAccounts(model.id)}
+            isTestingAll={testingAllIds.has(model.id)}
+            allResult={modelAllTests[model.id] || null}
             isTesting={testingModelIds.has(model.id)}
             isCustom
             isFree={false}
@@ -1155,6 +1522,10 @@ export default function ProviderDetailPage() {
               onDeleteAlias={() => handleDeleteAlias(existingAlias)}
               testStatus={modelTestResults[model.id]}
               onTest={connections.length > 0 || isFreeNoAuth ? () => handleTestModel(model.id) : undefined}
+            onTestAll={connections.length > 0 ? () => handleTestAllAccounts(model.id) : undefined}
+            onStopAll={() => handleStopAllAccounts(model.id)}
+            isTestingAll={testingAllIds.has(model.id)}
+            allResult={modelAllTests[model.id] || null}
               isTesting={testingModelIds.has(model.id)}
               isFree={model.isFree}
               onDisable={() => handleDisableModel(model.id)}
@@ -1493,6 +1864,75 @@ export default function ProviderDetailPage() {
               </div>
             </div>
           </div>
+
+          {RECOVERY_PROVIDER_IDS.has(providerId) && (
+            <div className="mb-4 rounded-lg border border-border bg-background/50 p-3">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h3 className="text-sm font-medium">Auto Model Recovery</h3>
+                  <p className="text-xs text-text-muted">
+                    Pings only automatically unavailable accounts. One healthy LLM model reactivates account.
+                  </p>
+                </div>
+                <Toggle
+                  checked={recoverySettings?.enabled === true}
+                  onChange={(enabled) => updateRecoverySettings({ enabled })}
+                  disabled={recoveryLoading || recoverySaving || !recoverySettings}
+                />
+              </div>
+              <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-end">
+                <label className="flex flex-col gap-1 text-xs text-text-muted">
+                  Interval (minutes)
+                  <input
+                    type="number"
+                    min={5}
+                    max={1440}
+                    value={recoverySettings?.intervalMinutes ?? 15}
+                    disabled={recoveryLoading || recoverySaving || !recoverySettings}
+                    onChange={(event) => {
+                      const intervalMinutes = Number(event.target.value);
+                      if (Number.isInteger(intervalMinutes) && intervalMinutes >= 5 && intervalMinutes <= 1440) {
+                        updateRecoverySettings({ intervalMinutes });
+                      }
+                    }}
+                    className="w-28 rounded-md border border-border bg-background px-2 py-1 text-sm text-text-main focus:outline-none focus:border-primary disabled:opacity-50"
+                  />
+                </label>
+                <label className="flex cursor-pointer items-center gap-2 text-sm text-text-main">
+                  <input
+                    type="checkbox"
+                    checked={recoverySettings?.applyProxy === true}
+                    disabled={recoveryLoading || recoverySaving || !recoverySettings}
+                    onChange={(event) => updateRecoverySettings({ applyProxy: event.target.checked })}
+                    className="h-4 w-4 rounded border-gray-300 text-primary focus:ring-primary"
+                  />
+                  Apply Proxy
+                </label>
+                {recoverySaving && <span className="text-xs text-text-muted">Saving...</span>}
+              </div>
+              {recoveryLoading && <p className="mt-2 text-xs text-text-muted">Loading recovery settings...</p>}
+              {recoveryError && <p className="mt-2 text-xs text-red-500">{recoveryError}</p>}
+            </div>
+          )}
+
+          {connections.length > 0 && (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <label className="flex items-center gap-2 text-xs text-text-muted">
+                <span className="material-symbols-outlined text-[16px]">sort</span>
+                Sort accounts
+                <select
+                  value={connectionSort}
+                  onChange={(event) => setConnectionSort(event.target.value)}
+                  className="rounded-md border border-border bg-background px-2 py-1.5 text-xs text-text-main focus:outline-none focus:border-primary"
+                >
+                  <option value="status">Status (available first)</option>
+                  <option value="name">Name (A–Z)</option>
+                  <option value="models_available">Most available models</option>
+                  <option value="models_exhausted">Most exhausted models</option>
+                </select>
+              </label>
+            </div>
+          )}
 
           {connections.length === 0 ? (
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">

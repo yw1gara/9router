@@ -1,10 +1,13 @@
 import { translateResponse, initState } from "../translator/index.js";
+import { normalizeToolFinishReason } from "../translator/concerns/finishReason.js";
 import { FORMATS } from "../translator/formats.js";
 import { trackPendingRequest, appendRequestLog } from "@/lib/usageDb.js";
 import { extractUsage, mergeUsage, hasValidUsage, estimateUsage, logUsage, addBufferToUsage, filterUsageForFormat, COLORS } from "./usageTracking.js";
 import { parseSSELine, hasValuableContent, fixInvalidId, formatSSE } from "./streamHelpers.js";
 import { getOpenAIResponsesEventName, isOpenAIResponsesTerminalEvent, formatIncompleteOpenAIResponsesStreamFailure } from "./responsesStreamHelpers.js";
 import { dbg, isDebugEnabled } from "./debugLog.js";
+import { detectDegenerateLoop, DEGENERATE_TAIL_WINDOW } from "./degenerate.js";
+import { noteTargetFailure } from "../services/combo.js";
 
 import { SSE_DONE, SSE_HEADERS, SSE_HEADERS_NO_BUFFER } from "./sseConstants.js";
 
@@ -105,8 +108,12 @@ export function createSSEStream(options = {}) {
     }
   };
 
+  // Degenerate-output guard: aborted streams must stop processing entirely.
+  let degenerateAborted = false;
+
   return new TransformStream({
     transform(chunk, controller) {
+      if (degenerateAborted) return;
       if (!ttftAt) ttftAt = Date.now();
       const text = decoder.decode(chunk, { stream: true });
       buffer += text;
@@ -147,6 +154,17 @@ export function createSSEStream(options = {}) {
               if (parsed.choices !== undefined) {
                 if (!parsed.object) { parsed.object = "chat.completion.chunk"; fieldsInjected = true; }
                 if (!parsed.created) { parsed.created = Math.floor(Date.now() / 1000); fieldsInjected = true; }
+              }
+
+              // Normalize non-standard tool finish aliases in OpenAI passthrough chunks.
+              if (parsed?.choices) {
+                for (const choice of parsed.choices) {
+                  const normalizedFinish = normalizeToolFinishReason(choice.finish_reason);
+                  if (normalizedFinish !== choice.finish_reason) {
+                    choice.finish_reason = normalizedFinish;
+                    fieldsInjected = true;
+                  }
+                }
               }
 
               // Strip Azure-specific non-standard fields from streaming chunks
@@ -371,9 +389,41 @@ export function createSSEStream(options = {}) {
           }
         }
       }
+
+      // Degenerate-output guard: some upstream models fall into a repetition
+      // loop (a short unit like "ía" or "</parameter" repeating for hundreds
+      // of KB). Detect it from the rolling tail of accumulated output and cut
+      // the stream with a clear error instead of flooding the client.
+      if (!degenerateAborted && accumulatedContent) {
+        const hit = detectDegenerateLoop(accumulatedContent.slice(-DEGENERATE_TAIL_WINDOW));
+        if (hit) {
+          degenerateAborted = true;
+          console.warn(`[DEGENERATE] ${provider || "?"}/${model || "?"} conn=${(connectionId || "").slice(0, 8)} — repetition loop (unit ${JSON.stringify(hit.unit)}, period ${hit.period}, ≥${hit.runLen} chars); aborting stream`);
+          // Demote this provider/model in every combo for the TTL so the next
+          // requests start from a healthier target instead of re-hitting it.
+          if (provider && model) {
+            try { noteTargetFailure(null, `${provider}/${model}`); } catch { /* demotion is best-effort */ }
+          }
+          const errChunk = `data: ${JSON.stringify({
+            error: {
+              message: `Upstream model produced degenerate repetitive output (loop unit ${JSON.stringify(hit.unit)}); stream aborted. Please retry — if it persists, try another model.`,
+              type: "server_error",
+              code: "degenerate_output",
+            },
+          })}\n\ndata: [DONE]\n\n`;
+          reqLogger?.appendConvertedChunk?.(errChunk);
+          controller.enqueue(sharedEncoder.encode(errChunk));
+          controller.terminate();
+          return;
+        }
+      }
     },
 
     flush(controller) {
+      if (degenerateAborted) {
+        trackPendingRequest(model, provider, connectionId, false);
+        return;
+      }
       const evtSummary = Object.entries(eventTypeCounts).map(([k, v]) => `${k}=${v}`).join(",") || "none";
       dbg("SSE", `flush | provider=${provider} | model=${model} | recvLines=${sseLineCount} | emitted=${sseEmittedCount} | events=[${evtSummary}]`);
       trackPendingRequest(model, provider, connectionId, false);

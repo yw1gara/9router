@@ -8,6 +8,33 @@ import { GITHUB_CONFIG } from "@/shared/constants/config";
 
 marked.setOptions({ gfm: true, breaks: true });
 
+// The changelog is fetched as raw markdown from GitHub and rendered with
+// dangerouslySetInnerHTML, so any raw HTML or dangerous link scheme in the
+// document must be neutralized (marked does not sanitize by itself).
+const escapeHtml = (s) => String(s ?? "")
+  .replace(/&/g, "&amp;")
+  .replace(/</g, "&lt;")
+  .replace(/>/g, "&gt;")
+  .replace(/"/g, "&quot;")
+  .replace(/'/g, "&#39;");
+
+marked.use({
+  renderer: {
+    // Raw HTML blocks/inline pass through marked untouched by default — escape
+    // them so they render as text instead of being injected into the DOM.
+    html(token) {
+      return escapeHtml(token?.text || token?.raw || "");
+    },
+    link(token) {
+      let href = String(token?.href || "");
+      if (/^\s*(javascript|data|vbscript):/i.test(href)) href = "#";
+      const text = this.parser.parseInline(token?.tokens || []);
+      const title = token?.title ? ` title="${escapeHtml(token.title)}"` : "";
+      return `<a href="${escapeHtml(href)}"${title} rel="noopener noreferrer">${text}</a>`;
+    },
+  },
+});
+
 export default function ChangelogModal({ isOpen, onClose }) {
   const [html, setHtml] = useState("");
   const [loading, setLoading] = useState(false);

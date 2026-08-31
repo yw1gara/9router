@@ -131,13 +131,62 @@ function getRefreshLockKey(provider, credentials) {
   return `${provider}:${stableId}`;
 }
 
-export async function withCredentialRefreshLock(provider, credentials, refreshFn) {
+// Latest persisted credentials, re-shaped for the caller's consumption. Used by
+// the re-check paths under the refresh lock — never refresh with a stale snapshot.
+function pickUsableCredentials(latest) {
+  return {
+    accessToken: latest.accessToken,
+    apiKey: latest.apiKey,
+    refreshToken: latest.refreshToken,
+    copilotToken: latest.copilotToken ?? latest.providerSpecificData?.copilotToken,
+    expiresAt: latest.expiresAt,
+    lastRefreshAt: latest.lastRefreshAt ?? latest.providerSpecificData?.lastRefreshAt,
+  };
+}
+
+export async function withCredentialRefreshLock(provider, credentials, refreshFn, getCurrentCredentials, isRefreshStillNeeded) {
   const key = getRefreshLockKey(provider, credentials);
   const existing = refreshLocks.get(key);
   if (existing) return existing;
 
   const pending = Promise.resolve()
-    .then(refreshFn)
+    .then(async () => {
+      // Re-check under the lock: a concurrent caller may have refreshed and
+      // persisted rotated tokens between our snapshot and lock acquisition.
+      // Refreshing again with the consumed (rotating) refresh token would
+      // yield invalid_grant and can mark a healthy connection as auth_failed.
+      // isRefreshStillNeeded lets forced callers (background scheduler, larger
+      // lead) bypass the re-check so proactive refreshes are not neutered.
+      if (getCurrentCredentials) {
+        try {
+          const latest = await getCurrentCredentials();
+          // Stale-snapshot race: the persisted refresh_token differs from the
+          // one this caller captured, so another refresh already rotated it.
+          // Refreshing with the old (now consumed) token would return
+          // invalid_grant and can revoke the whole token family. Reuse the
+          // latest persisted credentials instead — even for forced callers.
+          const tokenRotated =
+            latest &&
+            credentials?.refreshToken &&
+            latest.refreshToken &&
+            latest.refreshToken !== credentials.refreshToken;
+          if (tokenRotated) {
+            const pick = pickUsableCredentials(latest);
+            if (pick.refreshToken) return pick;
+          }
+          const stillNeeded = isRefreshStillNeeded
+            ? isRefreshStillNeeded(latest)
+            : shouldRefreshCredentials(provider, latest);
+          if (latest && !stillNeeded) {
+            const pick = pickUsableCredentials(latest);
+            if (pick.accessToken || pick.apiKey || pick.copilotToken || pick.refreshToken) {
+              return pick;
+            }
+          }
+        } catch { /* read failed — fall through to a real refresh */ }
+      }
+      return refreshFn();
+    })
     .finally(() => {
       refreshLocks.delete(key);
     });
@@ -146,11 +195,11 @@ export async function withCredentialRefreshLock(provider, credentials, refreshFn
   return pending;
 }
 
-export async function refreshProviderCredentials(provider, credentials, log) {
+export async function refreshProviderCredentials(provider, credentials, log, getCurrentCredentials, isRefreshStillNeeded) {
   if (!credentials) return null;
 
   return withCredentialRefreshLock(provider, credentials, async () => {
     const refreshed = await refreshTokenByProvider(provider, credentials, log);
     return mergeRefreshedCredentials(provider, credentials, refreshed);
-  });
+  }, getCurrentCredentials, isRefreshStillNeeded);
 }

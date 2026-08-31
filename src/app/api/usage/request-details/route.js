@@ -1,5 +1,13 @@
 import { NextResponse } from "next/server";
 import { getRequestDetails } from "@/lib/usageDb";
+import { getProviderConnectionById } from "@/lib/db/repos/connectionsRepo";
+
+function maskApiKey(key) {
+  const value = String(key || "");
+  if (!value) return "";
+  if (value.length <= 10) return value;
+  return `${value.slice(0, 6)}•••${value.slice(-4)}`;
+}
 
 /**
  * GET /api/usage/request-details
@@ -53,15 +61,39 @@ export async function GET(request) {
     // wholesale lets any dashboard-authenticated user (or, if requireLogin is
     // disabled, anyone) read every user's conversation history. Keep the
     // metadata (model, tokens, latency, status) but drop message content.
-    const redactedDetails = (result.details || []).map((d) => {
+    const redactedDetails = [];
+    const keyByConnectionId = new Map();
+    for (const d of result.details || []) {
       const redacted = { ...d };
       for (const key of ["request", "providerRequest", "providerResponse", "response"]) {
         if (redacted[key] !== undefined) {
           redacted[key] = { redacted: true };
         }
       }
-      return redacted;
-    });
+      redacted.apiKeyMask = "";
+      if (redacted.connectionId) {
+        if (!keyByConnectionId.has(redacted.connectionId)) {
+          try {
+            const connection = await getProviderConnectionById(redacted.connectionId);
+            const rawKey =
+              connection?.apiKey ||
+              connection?.providerSpecificData?.apiKey ||
+              connection?.providerSpecificData?.token ||
+              "";
+            keyByConnectionId.set(redacted.connectionId, {
+              label: connection?.name || connection?.email || redacted.connectionId.slice(0, 8),
+              masked: maskApiKey(rawKey),
+            });
+          } catch {
+            keyByConnectionId.set(redacted.connectionId, { label: "", masked: "" });
+          }
+        }
+        const hit = keyByConnectionId.get(redacted.connectionId);
+        if (hit?.label) redacted.connectionLabel = hit.label;
+        if (hit?.masked) redacted.apiKeyMask = hit.masked;
+      }
+      redactedDetails.push(redacted);
+    }
 
     return NextResponse.json({ ...result, details: redactedDetails });
   } catch (error) {

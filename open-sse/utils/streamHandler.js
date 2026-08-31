@@ -15,8 +15,15 @@ function getTimeString() {
  * @param {string} options.provider - Provider name
  * @param {string} options.model - Model name
  */
-export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "" } = {}) {
+export function createStreamController({ onDisconnect, onError, log, provider, model, reqTag = "" } = {}, externalSignal = null) {
   const abortController = new AbortController();
+
+  // Mirror an external abort (e.g. combo per-target timeout) into the
+  // controller's signal so in-flight upstream fetches are cancelled too.
+  if (externalSignal) {
+    if (externalSignal.aborted) abortController.abort();
+    else externalSignal.addEventListener?.("abort", () => abortController.abort(), { once: true });
+  }
   const startTime = Date.now();
   let disconnected = false;
   let abortTimeout = null;

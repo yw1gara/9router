@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-08-31T11:56:24.836Z",
+  "sessionId": "sess_15af7c34-7c8e-4b08-aa61-e1c3ddfc7d39",
+  "event": "PostToolUse",
+  "toolName": "Write",
+  "file": "unit/ssrf-scheme.test.js",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 5,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

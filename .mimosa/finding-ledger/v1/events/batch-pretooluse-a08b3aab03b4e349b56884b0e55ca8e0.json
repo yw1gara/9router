@@ -1,0 +1,48 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "pretooluse-a08b3aab03b4e349b56884b0e55ca8e0",
+  "runId": null,
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "PreToolUse"
+  },
+  "revision": null,
+  "diffHash": null,
+  "rulesVersion": null,
+  "sessionHash": "f7623eb6e70d952a3b4a2b6199f3523861b946ecab37a179044351f077523bdf",
+  "reportRef": null,
+  "events": [
+    {
+      "eventId": "hook-a003cb31787515356d539b7f87691f88",
+      "findingId": "mimosa-7bf3ce58701d051502a4633a",
+      "type": "finding_blocked",
+      "at": "2026-08-24T21:30:01.288Z",
+      "identity": {
+        "projectRelativeFile": "open-sse/handlers/chatCore.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 430,
+      "endLine": 430,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe"
+      },
+      "sequence": 0
+    }
+  ],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-08-24T21:30:01.733Z"
+}

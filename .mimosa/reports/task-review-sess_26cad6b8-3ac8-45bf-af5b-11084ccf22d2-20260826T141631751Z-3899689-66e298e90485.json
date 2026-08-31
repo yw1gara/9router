@@ -1,0 +1,144 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260826T141631751Z-3899689-66e298e90485",
+  "run_status": "completed",
+  "errors": [],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "complete",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 1201,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 2
+    },
+    "change_tracking": {
+      "touched_observed": 2,
+      "touched_retained": 2,
+      "truncated": false,
+      "bash_mutation": false,
+      "bash_discovered": 0,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 2,
+      "selected_files": 2,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 2,
+      "scanned_files": 2,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {},
+    "reasons": [],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-08-26T14:16:31.751Z",
+  "session_id": "sess_26cad6b8-3ac8-45bf-af5b-11084ccf22d2",
+  "target": ".",
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "rules_version": "unavailable",
+  "diff_hash": "f34056130a106d3d334b7fe035950d79eddcec4cec9745dfb42a2cd0307a9636",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 2,
+    "changed_files": [
+      {
+        "file": "src/sse/handlers/chat.js",
+        "ranges": [
+          {
+            "start": 379,
+            "end": 380
+          },
+          {
+            "start": 382,
+            "end": 382
+          }
+        ],
+        "before_hash": "eb003d112b2805625ea9b31906e7a3e1c076ee79495a47ae251219257a5b1f58",
+        "after_hash": "bfc757a5e586d17036e9249b8ecb67de4f54a39fb14b65fcf888593c3e4bb947"
+      },
+      {
+        "file": "src/sse/services/auth.js",
+        "ranges": [
+          {
+            "start": 129,
+            "end": 129
+          },
+          {
+            "start": 133,
+            "end": 133
+          }
+        ],
+        "before_hash": "f0e23846947c3213f97d4577dd6e2c841ae59b2fbb4d1e058eed49c0bef91146",
+        "after_hash": "9f5b70983bd04886722a19a734febee874ae06e7a5bd41bc3d853c7cffa6137c"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-08-26T14:16:30.701Z",
+    "completed_at": "2026-08-26T14:16:31.751Z",
+    "duration_ms": 1050,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "complete",
+    "latencyMs": 1050,
+    "peakMemoryBytes": 176721920,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 2,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_26cad6b8-3ac8-45bf-af5b-11084ccf22d2-20260826T141631751Z-3899689-66e298e90485.json",
+    "latest_report": ".mimosa/reports/task-review-sess_26cad6b8-3ac8-45bf-af5b-11084ccf22d2.json",
+    "history_summary": ".mimosa/history/run-20260826T141631751Z-3899689-66e298e90485.json"
+  }
+}

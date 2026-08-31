@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260831T123058434Z-1155393-732cbe08382b",
+  "runId": "20260831T123058434Z-1155393-732cbe08382b",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "ffa94033823c4f5f9318917058e1e14cf9afdc6bba264f1a2b6e44e315807d14",
+  "rulesVersion": "unavailable",
+  "sessionHash": "27b3eb07bfa4ffe834a90714f292352a9b20674d8c9bbb7d8be7660695c3b1bb",
+  "reportRef": ".mimosa/reports/task-review-sess_15af7c34-7c8e-4b08-aa61-e1c3ddfc7d39-20260831T123058434Z-1155393-732cbe08382b.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "open-sse/providers/registry/b-ai.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-31T12:30:58.832Z"
+}

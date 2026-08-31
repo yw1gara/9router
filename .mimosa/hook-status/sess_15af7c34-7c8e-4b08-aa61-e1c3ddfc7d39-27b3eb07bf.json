@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "mimosa-hook-status/v1",
+  "recordedAt": "2026-08-31T12:31:45.681Z",
+  "sessionId": "sess_15af7c34-7c8e-4b08-aa61-e1c3ddfc7d39",
+  "event": "PostToolUse",
+  "toolName": "Edit",
+  "file": "open-sse/providers/registry/b-ai.js",
+  "outcome": "clear",
+  "coverage": "complete",
+  "findingCount": 0,
+  "durationMs": 7,
+  "hostState": "hook_complete",
+  "reportHint": ".mimosa/reports/"
+}

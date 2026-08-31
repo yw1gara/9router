@@ -67,6 +67,28 @@ export class DefaultExecutor extends BaseExecutor {
     super(provider, PROVIDERS[provider] || PROVIDERS.openai);
   }
 
+  // Standard Retry-After semantics for openai-compatible upstreams (e.g.
+  // OrcaRouter free tier: "wait the exact duration, retry once" — NOT
+  // exponential backoff). Seconds or HTTP-date form; consumer caps at
+  // MAX_RATE_LIMIT_COOLDOWN_MS.
+  parseError(response, bodyText) {
+    const parsed = super.parseError(response, bodyText);
+    try {
+      const ra = response?.headers?.get?.("retry-after");
+      if (ra) {
+        const trimmed = String(ra).trim();
+        const secs = Number(trimmed);
+        const deltaMs = trimmed !== "" && Number.isFinite(secs)
+          ? secs * 1000
+          : new Date(trimmed).getTime() - Date.now();
+        if (Number.isFinite(deltaMs) && deltaMs > 0) {
+          parsed.resetsAtMs = Date.now() + deltaMs;
+        }
+      }
+    } catch { /* headers unavailable — keep base result */ }
+    return parsed;
+  }
+
   transformRequest(model, body) {
     const transformed = this.applyJsonSchemaFallback(body);
 

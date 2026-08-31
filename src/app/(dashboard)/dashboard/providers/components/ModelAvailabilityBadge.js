@@ -18,13 +18,27 @@ const STATUS_CONFIG = {
   unknown: { icon: "help", color: "#6b7280", label: "Unknown" },
 };
 
+function formatRemaining(ms) {
+  const secs = Math.ceil(ms / 1000);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ${secs % 60}s`;
+  return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+}
+
 export default function ModelAvailabilityBadge() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState(false);
   const [clearing, setClearing] = useState(null);
+  const [now, setNow] = useState(() => Date.now());
   const ref = useRef(null);
   const notify = useNotificationStore();
+
+  // Live 1s tick so cooldown countdowns animate without refetching the API.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -41,9 +55,9 @@ export default function ModelAvailabilityBadge() {
   }, []);
 
   useEffect(() => {
-    fetchStatus();
+    const t = setTimeout(fetchStatus, 0);
     const interval = setInterval(fetchStatus, 30000);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, [fetchStatus]);
 
   // Close popover on outside click
@@ -79,8 +93,9 @@ export default function ModelAvailabilityBadge() {
   if (loading) return null;
 
   const models = data?.models || [];
-  const unavailableCount = data?.unavailableCount || models.filter((m) => m.status !== "available").length;
-  const isHealthy = unavailableCount === 0;
+  const cooldownCount = data?.cooldownCount ?? models.filter((m) => m.status === "cooldown").length;
+  const unavailableCount = data?.unavailableCount ?? models.filter((m) => m.status === "unavailable").length;
+  const isHealthy = cooldownCount === 0 && unavailableCount === 0;
 
   // Group unhealthy models by provider
   const byProvider = {};
@@ -93,7 +108,7 @@ export default function ModelAvailabilityBadge() {
 
   return (
     <div className="relative" ref={ref}>
-      {/* <button
+      <button
         onClick={() => setExpanded(!expanded)}
         className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${
           isHealthy
@@ -106,8 +121,11 @@ export default function ModelAvailabilityBadge() {
         </span>
         {isHealthy
           ? "All models operational"
-          : `${unavailableCount} model${unavailableCount !== 1 ? "s" : ""} with issues`}
-      </button> */}
+          : [
+              cooldownCount > 0 ? `${cooldownCount} model${cooldownCount !== 1 ? "s" : ""} cooling down` : null,
+              unavailableCount > 0 ? `${unavailableCount} account${unavailableCount !== 1 ? "s" : ""} unavailable` : null,
+            ].filter(Boolean).join(" · ")}
+      </button>
 
       {expanded && (
         <div className="absolute top-full right-0 mt-2 w-80 bg-surface border border-border rounded-xl shadow-2xl z-50 overflow-hidden">
@@ -144,9 +162,18 @@ export default function ModelAvailabilityBadge() {
                       {provModels.map((m) => {
                         const status = STATUS_CONFIG[m.status] || STATUS_CONFIG.unknown;
                         const isClearing = clearing === `${m.provider}:${m.model}`;
+                        const isAccountWide = m.model === "__all";
+                        const label = isAccountWide ? "All models" : m.model;
                         return (
                           <div
                             key={`${m.provider}-${m.model}`}
+                            title={
+                              isAccountWide
+                                ? `Account-level error — every model on this account failed last time: ${m.lastError || "unknown error"}`
+                                : m.lastError
+                                  ? `${m.provider}/${m.model}: ${m.lastError}`
+                                  : `${m.provider}/${m.model}`
+                            }
                             className="flex items-center justify-between px-2.5 py-1.5 rounded-lg bg-surface/30"
                           >
                             <div className="flex items-center gap-1.5 min-w-0">
@@ -156,7 +183,17 @@ export default function ModelAvailabilityBadge() {
                               >
                                 {status.icon}
                               </span>
-                              <span className="font-mono text-xs text-text-main truncate">{m.model}</span>
+                              <span className="font-mono text-xs text-text-main truncate">
+                                {label}
+                                {isAccountWide && (
+                                  <span className="ml-1 font-sans text-[10px] text-text-muted">(account error)</span>
+                                )}
+                              </span>
+                              {m.until && new Date(m.until).getTime() > now && (
+                                <span className="font-mono text-[10px] text-orange-500 shrink-0" title={`Cooldown until ${new Date(m.until).toLocaleString()}`}>
+                                  ⏱ {formatRemaining(new Date(m.until).getTime() - now)}
+                                </span>
+                              )}
                             </div>
                             {m.status === "cooldown" && (
                               <Button

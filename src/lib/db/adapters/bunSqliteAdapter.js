@@ -31,9 +31,19 @@ export async function createBunSqliteAdapter(filePath) {
     try { db.close(); } catch {}
   }
   const onShutdown = () => gracefulClose();
+  const exitAfterGrace = () => {
+    // Close the DB only AFTER the drain grace period (see betterSqliteAdapter
+    // for the race this fixes: closing on signal arrival kills live requests).
+    const SHUTDOWN_GRACE_MS = 1000;
+    const t = setTimeout(() => {
+      onShutdown();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS);
+    t.unref?.();
+  };
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  process.once("SIGINT", exitAfterGrace);
+  process.once("SIGTERM", exitAfterGrace);
 
   return {
     driver: "bun:sqlite",

@@ -1,0 +1,39 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260823T020320594Z-3608787-abe0deabe628",
+  "runId": "20260823T020320594Z-3608787-abe0deabe628",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "ebf5516519047c19e1961a4923578c8ef4ede27cff56124ac3e81f674c0873f6",
+  "rulesVersion": "unavailable",
+  "sessionHash": "e14bde6b6b76da6439acd84cbcffe930f7747c3589675b781de1a20a42841546",
+  "reportRef": ".mimosa/reports/task-review-sess_d20ec933-2577-431c-bca1-41331a049b32-20260823T020320594Z-3608787-abe0deabe628.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "open-sse/config/errorConfig.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "open-sse/services/accountFallback.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "tests/unit/timeout-cooldown-classification.test.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-23T02:03:21.027Z"
+}

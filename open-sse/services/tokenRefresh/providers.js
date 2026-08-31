@@ -2,6 +2,7 @@ import { PROVIDERS, PROVIDER_OAUTH } from "../../config/providers.js";
 import { OAUTH_ENDPOINTS, GITHUB_COPILOT, buildKimiHeaders } from "../../config/appConstants.js";
 import { proxyAwareFetch } from "../../utils/proxyFetch.js";
 import { dedupRefresh } from "./dedup.js";
+import { serializeRefresh } from "../refreshSerializer.js";
 import { buildExternalIdpRefreshParams } from "../../../src/lib/oauth/kiroExternalIdp.js";
 
 let _xaiServiceSingleton = null;
@@ -241,30 +242,42 @@ export function classifyOAuthRefreshError(errorText = "", status = 0) {
     parsed = null;
   }
 
-  const code = parsed?.error?.code || parsed?.error || parsed?.error_code || "";
-  const description = parsed?.error_description || parsed?.message || errorText || "";
+  const rawError = parsed?.error;
+  const code =
+    (rawError && typeof rawError === "object" ? rawError.code : rawError) ||
+    parsed?.error_code ||
+    "";
+  const description =
+    parsed?.error_description ||
+    parsed?.message ||
+    (rawError && typeof rawError === "object" ? rawError.message : "") ||
+    errorText ||
+    "";
   const combined = `${code} ${description}`.toLowerCase();
   const permanent = [
     "refresh_token_expired",
     "refresh_token_reused",
     "refresh_token_invalidated",
     "invalid_grant",
+    "token_expired",
+    "invalid_token",
   ].some((marker) => combined.includes(marker));
 
-  return { status, code, description, permanent };
+  return { status, code, description, permanent: permanent || status === 401 };
 }
 
 export async function refreshCodexToken(refreshToken, log) {
   if (!refreshToken) return null;
-  return dedupRefresh("codex", refreshToken, async () => {
+  return serializeRefresh("codex", () =>
+    dedupRefresh("codex", refreshToken, async () => {
     try {
       const response = await fetch(OAUTH_ENDPOINTS.openai.token, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
           Accept: "application/json",
         },
-        body: JSON.stringify({
+        body: new URLSearchParams({
           client_id: PROVIDERS.codex.clientId,
           grant_type: "refresh_token",
           refresh_token: refreshToken,
@@ -279,7 +292,10 @@ export async function refreshCodexToken(refreshToken, log) {
             status: response.status,
             code: failure.code,
           });
-          return { error: "unrecoverable_refresh_error", code: failure.code };
+          return {
+            error: "unrecoverable_refresh_error",
+            code: failure.code || (response.status === 401 ? "unauthorized" : "token_invalid"),
+          };
         }
 
         log?.error?.("TOKEN_REFRESH", "Failed to refresh Codex token", {
@@ -310,7 +326,8 @@ export async function refreshCodexToken(refreshToken, log) {
       log?.error?.("TOKEN_REFRESH", `Network error refreshing Codex token: ${error.message}`);
       return null;
     }
-  }, log);
+    }, log)
+  );
 }
 
 async function resolveKiroProfileArnPatch(providerSpecificData, accessToken, refreshedArn) {

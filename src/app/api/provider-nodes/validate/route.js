@@ -15,8 +15,8 @@ const fetchWithTimeout = (url, options, timeout = 10000) => {
 // Validate URL format
 const isValidUrl = (url) => {
   try {
-    new URL(url);
-    return true;
+    const parsed = new URL(url);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
   } catch {
     return false;
   }

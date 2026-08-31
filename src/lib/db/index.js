@@ -1,10 +1,12 @@
 // Public API barrel — all DB functions
 import { getAdapter } from "./driver.js";
 import { stringifyJson, parseJson } from "./helpers/jsonCol.js";
+import { invalidateSettingsCache } from "./repos/settingsRepo.js";
 
 // Settings
 export {
-  getSettings, updateSettings, isCloudEnabled, getCloudUrl, exportSettings,
+  getSettings, updateSettings, updateProviderRecoverySettings,
+  isCloudEnabled, getCloudUrl, exportSettings, invalidateSettingsCache,
 } from "./repos/settingsRepo.js";
 
 // Provider connections
@@ -26,6 +28,19 @@ export {
   getProxyPools, getProxyPoolById,
   createProxyPool, updateProxyPool, deleteProxyPool,
 } from "./repos/proxyPoolsRepo.js";
+
+// Proxy pool fitness (scoped cooldowns)
+export {
+  listProxyPoolFitness, upsertProxyPoolFitness,
+  deleteProxyPoolFitness, deleteProxyPoolFitnessByPool,
+  clearProxyPoolFitness, pruneExpiredProxyPoolFitness,
+} from "./repos/proxyPoolFitnessRepo.js";
+
+// Mail-recovery IMAP credentials
+export {
+  getImapCredentials, getImapCredentialById, getImapCredentialByEmail,
+  createImapCredential, updateImapCredential, deleteImapCredential,
+} from "./repos/imapCredentialsRepo.js";
 
 // API keys
 export {
@@ -59,6 +74,7 @@ export {
 export {
   statsEmitter, trackPendingRequest, getActiveRequests,
   saveRequestUsage, getUsageHistory, getUsageStats, getChartData,
+  getUsageAnalytics,
   appendRequestLog, getRecentLogs,
 } from "./repos/usageRepo.js";
 
@@ -162,6 +178,8 @@ export async function importDb(payload) {
     }
   });
 
+  // The settings row was (potentially) replaced — drop the raw-settings cache.
+  invalidateSettingsCache();
   return await exportDb();
 }
 

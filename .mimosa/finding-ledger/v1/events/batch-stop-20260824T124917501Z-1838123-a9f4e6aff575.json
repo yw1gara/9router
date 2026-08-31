@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260824T124917501Z-1838123-a9f4e6aff575",
+  "runId": "20260824T124917501Z-1838123-a9f4e6aff575",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "78aa4607dee7c260ef31d7c0efec3e71ca761fd55b5a22719a7663d8840fbd7d",
+  "rulesVersion": "unavailable",
+  "sessionHash": "e14bde6b6b76da6439acd84cbcffe930f7747c3589675b781de1a20a42841546",
+  "reportRef": ".mimosa/reports/task-review-sess_d20ec933-2577-431c-bca1-41331a049b32-20260824T124917501Z-1838123-a9f4e6aff575.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "src/lib/db/repos/settingsRepo.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/sse/services/auth.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/lib/providers/modelCatalog.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/sse/services/providerRecoveryMonitor.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/app/(dashboard)/dashboard/providers/components/ModelLockChips.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-24T12:49:17.946Z"
+}

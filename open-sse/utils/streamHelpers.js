@@ -4,9 +4,12 @@ import { FORMATS } from "../translator/formats.js";
 export function parseSSELine(line, format = null) {
   if (!line) return null;
 
-  // NDJSON format (Ollama): raw JSON lines without "data:" prefix
-  if (format === FORMATS.OLLAMA) {
-    const trimmed = line.trim();
+  // NDJSON format (Ollama): raw JSON lines without "data:" prefix.
+  // When no format is given (e.g. the final buffer flush in stream.js),
+  // auto-detect raw JSON lines so a trailing NDJSON chunk without a newline
+  // is not silently dropped.
+  const trimmed = line.trim();
+  if (format === FORMATS.OLLAMA || format == null) {
     if (trimmed.startsWith("{")) {
       try {
         return JSON.parse(trimmed);
@@ -14,7 +17,8 @@ export function parseSSELine(line, format = null) {
         return null;
       }
     }
-    return null;
+    if (format === FORMATS.OLLAMA) return null;
+    // format == null and not raw JSON — fall through to the SSE branch.
   }
 
   // Standard SSE format: "data: {...}"

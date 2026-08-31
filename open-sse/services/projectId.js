@@ -16,6 +16,19 @@ const projectIdCache = new Map();
 /** How long a cached project ID is considered fresh (1 hour). */
 const CACHE_TTL_MS = 60 * 60 * 1000;
 
+/**
+ * How long a FAILED (null) lookup is remembered before retrying.
+ * Without negative caching, every chat request for a connection that cannot
+ * onboard re-ran the whole onboardUser flow (5 attempts × network + sleeps)
+ * — tens of thousands of wasted retries and big per-request latency.
+ */
+const NEGATIVE_CACHE_TTL_MS = 10 * 60 * 1000;
+
+/** TTL for a cache entry, depending on whether it holds a real id. */
+function cacheTtlMs(entry) {
+    return entry?.projectId ? CACHE_TTL_MS : NEGATIVE_CACHE_TTL_MS;
+}
+
 // ─── Pending-fetch deduplication ─────────────────────────────────────────────
 // connectionId -> { promise: Promise<string|null>, controller: AbortController, startedAt: number }
 const pendingFetches = new Map();
@@ -34,7 +47,7 @@ export function cleanupNow() {
     const now = Date.now();
 
     for (const [id, entry] of projectIdCache) {
-        if (!entry || now - entry.fetchedAt >= CACHE_TTL_MS) {
+        if (!entry || now - entry.fetchedAt >= cacheTtlMs(entry)) {
             projectIdCache.delete(id);
         }
     }
@@ -86,9 +99,9 @@ startCacheCleanup();
 export async function getProjectIdForConnection(connectionId, accessToken, provider = "gemini-cli") {
     if (!connectionId || !accessToken) return null;
 
-    // Return cached value if still fresh
+    // Return cached value if still fresh (negative entries expire sooner)
     const cached = projectIdCache.get(connectionId);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.fetchedAt < cacheTtlMs(cached)) {
         return cached.projectId;
     }
 
@@ -107,10 +120,13 @@ export async function getProjectIdForConnection(connectionId, accessToken, provi
                 projectIdCache.set(connectionId, {projectId, fetchedAt: Date.now()});
                 return projectId;
             }
-            console.warn("[ProjectId] could not fetch projectId for connection", connectionId.slice(0, 8));
+            // Negative cache: remember the failure briefly so every request on
+            // this connection doesn't re-run the whole onboarding flow.
+            projectIdCache.set(connectionId, {projectId: null, fetchedAt: Date.now()});
             return null;
         } catch (error) {
             console.warn(`[ProjectId] Error fetching project ID: ${error.message}`);
+            projectIdCache.set(connectionId, {projectId: null, fetchedAt: Date.now()});
             return null;
         } finally {
             pendingFetches.delete(connectionId);
@@ -238,7 +254,10 @@ async function onboardUser(accessToken, tierID, externalSignal, endpoints, provi
                     console.log(`[ProjectId] Successfully onboarded, project ID: ${projectId}`);
                     return projectId;
                 }
-                throw new Error("onboardUser done but no project_id in response");
+                // Terminal response: done but no id. The upstream answered
+                // deterministically — retrying the same POST cannot succeed.
+                console.warn(`[ProjectId] onboardUser done but no project_id in response (response shape mismatch?), body: ${JSON.stringify(data).slice(0, 300)}`);
+                return null;
             }
 
             // Server not done yet – wait and retry

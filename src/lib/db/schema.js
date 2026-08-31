@@ -3,7 +3,7 @@
 // pre-change safety backup in migrate.js: when the stored version is lower,
 // one lightweight DB backup is taken before applying schema changes. Forgetting
 // to bump only skips that backup — it does NOT break the additive auto-sync.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 4;
 
 export const PRAGMA_SQL = `
 PRAGMA journal_mode = WAL;
@@ -74,6 +74,40 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_pp_active ON proxyPools(isActive)",
       "CREATE INDEX IF NOT EXISTS idx_pp_status ON proxyPools(testStatus)",
     ],
+  },
+  // Durable per-scope pool cooldown registry ("fitness"). Scope format:
+  // `provider::model` or `provider::*` (provider-wide). `until` is epoch-ms.
+  proxyPoolFitness: {
+    columns: {
+      poolId: "TEXT NOT NULL",
+      scope: "TEXT NOT NULL",
+      until: "INTEGER NOT NULL",
+      reason: "TEXT",
+      failureCount: "INTEGER NOT NULL DEFAULT 1",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_ppf_pool ON proxyPoolFitness(poolId)",
+      "CREATE INDEX IF NOT EXISTS idx_ppf_expiry ON proxyPoolFitness(until)",
+    ],
+  },
+  // Mail-recovery IMAP credentials (Outlook XOAUTH2) for Codex re-login assist.
+  // refreshToken here is the MICROSOFT mailbox refresh token — never an OpenAI token.
+  imapCredentials: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      email: "TEXT UNIQUE NOT NULL",
+      clientId: "TEXT NOT NULL",
+      refreshToken: "TEXT NOT NULL",
+      provider: "TEXT NOT NULL DEFAULT 'outlook'",
+      testStatus: "TEXT",
+      lastTested: "TEXT",
+      lastError: "TEXT",
+      createdAt: "TEXT NOT NULL",
+      updatedAt: "TEXT NOT NULL",
+    },
+    indexes: ["CREATE INDEX IF NOT EXISTS idx_imap_email ON imapCredentials(email)"],
   },
   apiKeys: {
     columns: {
@@ -150,6 +184,43 @@ export const TABLES = {
       "CREATE INDEX IF NOT EXISTS idx_rd_provider ON requestDetails(provider)",
       "CREATE INDEX IF NOT EXISTS idx_rd_model ON requestDetails(model)",
       "CREATE INDEX IF NOT EXISTS idx_rd_conn ON requestDetails(connectionId)",
+    ],
+  },
+  // Automation (account-farm) runs and per-account results.
+  automationRuns: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      kind: "TEXT NOT NULL",
+      status: "TEXT NOT NULL",
+      total: "INTEGER NOT NULL DEFAULT 0",
+      success: "INTEGER NOT NULL DEFAULT 0",
+      failed: "INTEGER NOT NULL DEFAULT 0",
+      log: "TEXT",
+      createdAt: "TEXT NOT NULL",
+      startedAt: "TEXT",
+      finishedAt: "TEXT",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_arun_kind ON automationRuns(kind)",
+      "CREATE INDEX IF NOT EXISTS idx_arun_created ON automationRuns(createdAt DESC)",
+    ],
+  },
+  automationResults: {
+    columns: {
+      id: "TEXT PRIMARY KEY",
+      runId: "TEXT NOT NULL",
+      kind: "TEXT NOT NULL",
+      email: "TEXT NOT NULL",
+      status: "TEXT NOT NULL",
+      apiKey: "TEXT",
+      error: "TEXT",
+      connectionId: "TEXT",
+      createdAt: "TEXT NOT NULL",
+    },
+    indexes: [
+      "CREATE INDEX IF NOT EXISTS idx_ares_run ON automationResults(runId)",
+      "CREATE INDEX IF NOT EXISTS idx_ares_kind ON automationResults(kind)",
+      "CREATE INDEX IF NOT EXISTS idx_ares_email ON automationResults(email)",
     ],
   },
 };

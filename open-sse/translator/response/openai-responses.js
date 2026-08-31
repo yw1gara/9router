@@ -467,25 +467,52 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
   // Function call started (standard function_call or custom_tool_call)
   if (eventType === "response.output_item.added" && (data.item?.type === RESPONSES_ITEM.FUNCTION_CALL || data.item?.type === "custom_tool_call")) {
     const item = data.item;
-    state.currentToolCallId = item.call_id || fallbackToolCallId();
-
-    return buildChunk(
-      { id: state.chatId, created: state.created, model: state.model || MODEL_FALLBACK },
-      {
-        tool_calls: [{
-          index: state.toolCallIndex,
-          id: state.currentToolCallId,
-          type: OPENAI_BLOCK.FUNCTION,
-          function: { name: item.name || "", arguments: "" }
-        }]
-      }
-    );
+    // Some upstreams announce the item with name/call_id still empty and only
+    // fill them at output_item.done. Emitting the chat tool-call header
+    // immediately would hand the client id:"" name:"" (dsh then fails with
+    // `unknown tool ""`). Emit immediately only when both are known; otherwise
+    // park the call — arguments buffer until the header can be emitted at done.
+    state.pendingToolCall = {
+      index: state.toolCallIndex,
+      id: item.call_id || "",
+      type: OPENAI_BLOCK.FUNCTION,
+      name: item.name || "",
+      argsBuf: "",
+    };
+    if (!state.currentToolCallId) state.currentToolCallId = item.call_id || "";
+    if (state.pendingToolCall.id && state.pendingToolCall.name) {
+      const p = state.pendingToolCall;
+      state.pendingToolCall = null;
+      return buildChunk(
+        { id: state.chatId, created: state.created, model: state.model || MODEL_FALLBACK },
+        {
+          tool_calls: [{
+            index: p.index,
+            id: p.id,
+            type: p.type,
+            function: { name: p.name, arguments: "" }
+          }]
+        }
+      );
+    }
+    return null;
   }
 
   // Function call arguments delta (standard or custom_tool_call variant)
   if (eventType === "response.function_call_arguments.delta" || eventType === "response.custom_tool_call_input.delta") {
     const argsDelta = data.delta || "";
     if (!argsDelta) return null;
+
+    // Header still parked: buffer the arguments so nothing reaches the client
+    // before the tool call's identity does.
+    if (state.pendingToolCall) {
+      state.pendingToolCall.argsBuf += argsDelta;
+      if (!state.pendingToolCall.id && data.item_id) {
+        state.pendingToolCall.id = data.item_id;
+        if (!state.currentToolCallId) state.currentToolCallId = data.item_id;
+      }
+      return null;
+    }
 
     return buildChunk(
       { id: state.chatId, created: state.created, model: state.model || MODEL_FALLBACK },
@@ -495,8 +522,37 @@ export function openaiResponsesToOpenAIResponse(chunk, state) {
 
   // Function call done (standard or custom_tool_call variant)
   if (eventType === "response.output_item.done" && (data.item?.type === RESPONSES_ITEM.FUNCTION_CALL || data.item?.type === "custom_tool_call")) {
+    // item.done carries the authoritative name/call_id — patch a parked call
+    // with them, then flush header + buffered arguments together.
+    const chunks = [];
+    if (state.pendingToolCall) {
+      const p = state.pendingToolCall;
+      if (data.item?.name) p.name = data.item.name;
+      if (data.item?.call_id) {
+        p.id = data.item.call_id;
+        state.currentToolCallId = data.item.call_id;
+      }
+      state.pendingToolCall = null;
+      chunks.push(buildChunk(
+        { id: state.chatId, created: state.created, model: state.model || MODEL_FALLBACK },
+        {
+          tool_calls: [{
+            index: p.index,
+            id: p.id || fallbackToolCallId(),
+            type: p.type,
+            function: { name: p.name || "", arguments: "" }
+          }]
+        }
+      ));
+      if (p.argsBuf) {
+        chunks.push(buildChunk(
+          { id: state.chatId, created: state.created, model: state.model || MODEL_FALLBACK },
+          { tool_calls: [{ index: p.index, function: { arguments: p.argsBuf } }] }
+        ));
+      }
+    }
     state.toolCallIndex++;
-    return null;
+    return chunks.length ? chunks : null;
   }
 
   // Response completed

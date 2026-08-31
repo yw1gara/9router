@@ -1,0 +1,176 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260824T213200305Z-2806002-78aa6c677ef7",
+  "run_status": "completed",
+  "errors": [],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "complete",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 1201,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 1
+    },
+    "change_tracking": {
+      "touched_observed": 1,
+      "touched_retained": 1,
+      "truncated": false,
+      "bash_mutation": true,
+      "bash_discovered": 1,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 1,
+      "selected_files": 1,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 1,
+      "scanned_files": 1,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 0,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": false
+    },
+    "reason_counts": {},
+    "reasons": [],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-08-24T21:32:00.305Z",
+  "session_id": "sess_395af2d1-f004-4d30-9718-6347ce3f154d",
+  "target": ".",
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "rules_version": "unavailable",
+  "diff_hash": "c230eabe875d5c469785d6066baa1926afe4ebcc29eab3b10dbc858686300dbf",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 1,
+    "changed_files": [
+      {
+        "file": "open-sse/handlers/chatCore.js",
+        "ranges": [
+          {
+            "start": 326,
+            "end": 333
+          },
+          {
+            "start": 376,
+            "end": 376
+          },
+          {
+            "start": 427,
+            "end": 435
+          },
+          {
+            "start": 446,
+            "end": 454
+          }
+        ],
+        "before_hash": "0a59ad877a16ce0908f4b93e2d770f5ddc34a7f5650046e5a00a16893365a551",
+        "after_hash": "fc9c6603984d75e75412fcaac274e1732cf21f8c38c89d5ac3d9749d163bfbad"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-08-24T21:31:59.230Z",
+    "completed_at": "2026-08-24T21:32:00.305Z",
+    "duration_ms": 1075,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "complete",
+    "latencyMs": 1075,
+    "peakMemoryBytes": 173420544,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 1,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 0,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [
+    {
+      "finding_id": "mimosa-7bf3ce58701d051502a4633a",
+      "file": "open-sse/handlers/chatCore.js",
+      "line": 430,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "SQL 注入",
+      "status": "blocked",
+      "decision": "deny",
+      "at": "2026-08-24T21:29:35.171Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-7bf3ce58701d051502a4633a",
+      "file": "open-sse/handlers/chatCore.js",
+      "line": 430,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "SQL 注入",
+      "status": "blocked",
+      "decision": "deny",
+      "at": "2026-08-24T21:30:01.288Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe",
+        "runtime_oracle": false
+      }
+    }
+  ],
+  "findings": [],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_395af2d1-f004-4d30-9718-6347ce3f154d-20260824T213200305Z-2806002-78aa6c677ef7.json",
+    "latest_report": ".mimosa/reports/task-review-sess_395af2d1-f004-4d30-9718-6347ce3f154d.json",
+    "history_summary": ".mimosa/history/run-20260824T213200305Z-2806002-78aa6c677ef7.json"
+  }
+}

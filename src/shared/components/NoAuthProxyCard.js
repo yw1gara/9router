@@ -11,6 +11,7 @@ const STRATEGIES = [
   { value: "none", label: "None (single pool)" },
   { value: "round-robin", label: "Round-robin" },
   { value: "random", label: "Random" },
+  { value: "smart", label: "Smart (sticky + auto-rotate)" },
 ];
 
 export default function NoAuthProxyCard({ providerId }) {
@@ -121,8 +122,10 @@ export default function NoAuthProxyCard({ providerId }) {
             : isRotation
               ? rotateStrategy === "round-robin"
                 ? `Rotating through all ${proxyPools.length} active pools in order. State is in-memory (resets on restart).`
-                : `Picking a random pool from ${proxyPools.length} active pools each request.`
-              : `Uses the selected pool above. Set to Round-robin or Random to rotate across all active pools.`}
+                : rotateStrategy === "smart"
+                  ? `Sticks to one healthy pool and keeps the same egress IP; auto-rotates to another pool when it fails (5 min cooldown per failed pool).`
+                  : `Picking a random pool from ${proxyPools.length} active pools each request.`
+              : `Uses the selected pool above. Set to Round-robin, Random, or Smart to rotate across all active pools.`}
         </p>
       </div>
     </Card>

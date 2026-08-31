@@ -118,6 +118,19 @@ async function runHeavyStartup() {
   import("@/sse/services/backgroundTokenRefresh.js")
     .then(({ startBackgroundTokenRefresh }) => startBackgroundTokenRefresh())
     .catch((e) => console.log("[BackgroundTokenRefresh] scheduler start failed:", e.message));
+
+  // Pool egress geo probe + state sweeper (fitness/geo pruning). Both are
+  // idempotent, unref'd, and disabled via POOL_EGRESS_PROBE_DISABLED=1.
+  import("@/lib/network/poolEgressProbe.js")
+    .then(({ startPoolEgressProbe }) => startPoolEgressProbe())
+    .catch((e) => console.log("[PoolEgressProbe] scheduler start failed:", e.message));
+  import("@/lib/network/stateSweeper.js")
+    .then(({ startStateSweeper }) => startStateSweeper())
+    .catch((e) => console.log("[StateSweeper] scheduler start failed:", e.message));
+
+  import("@/sse/services/providerRecoveryMonitor.js")
+    .then(({ startProviderRecoveryMonitor }) => startProviderRecoveryMonitor({ settings }))
+    .catch((e) => console.log("[ProviderRecovery] scheduler start failed:", e.message));
 }
 
 function hasQuotaAutoPingEnabled(settings) {

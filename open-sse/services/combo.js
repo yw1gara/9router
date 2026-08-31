@@ -2,10 +2,30 @@
  * Shared combo (model combo) handling with fallback support
  */
 
-import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { checkFallbackError, formatRetryAfter, isTargetDenied } from "./accountFallback.js";
+import { resolveProviderId } from "../../src/shared/constants/providers.js";
+
+/**
+ * Normalize a combo target's provider prefix to its canonical provider id so
+ * denial marks (keyed `provider/model` post-resolution) also match targets
+ * stored under an alias (e.g. `oc/...` vs `opencode/...`).
+ */
+function normalizeDeniedKey(target) {
+  const sep = String(target || "").indexOf("/");
+  if (sep <= 0) return target;
+  return `${resolveProviderId(target.slice(0, sep))}/${target.slice(sep + 1)}`;
+}
+
+function isTargetDeniedAliasAware(target) {
+  return isTargetDenied(target) || isTargetDenied(normalizeDeniedKey(target));
+}
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
+import {
+  DEFAULT_COMBO_TARGET_TIMEOUT_MS,
+  COMBO_TRANSIENT_WAIT_MS,
+} from "../config/runtimeConfig.js";
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
@@ -86,6 +106,96 @@ export function reorderByCapabilities(models, required) {
  * @type {Map<string, { index: number, consecutiveUseCount: number }>}
  */
 const comboRotationState = new Map();
+
+/**
+ * Short-term health memory for combo targets: models that just failed
+ * (timeout / 5xx / fallback error) are demoted to the back of the combo for
+ * the next requests, so switching away from a degraded target is immediate
+ * instead of retrying it first on every request. Entries expire after a TTL;
+ * a success clears the entry so recovered targets re-enter the front.
+ * In-memory only — restart resets it (fine: DB model-locks cover persistence).
+ * @type {Map<string, number>} key `${comboName}|${model}` -> expiry epoch ms
+ */
+const TARGET_FAILURE_TTL_MS = 60 * 1000;
+const TARGET_FAILURE_MAP_MAX = 500;
+const recentTargetFailures = new Map();
+
+function targetFailureKey(comboName, model) {
+  return `${comboName || ""}|${model}`;
+}
+
+export function noteTargetFailure(comboName, model, ttlMs = TARGET_FAILURE_TTL_MS) {
+  if (!model) return;
+  const now = Date.now();
+  // Lazy eviction + hard cap so the map can't grow unbounded.
+  if (recentTargetFailures.size >= TARGET_FAILURE_MAP_MAX) {
+    for (const [k, exp] of recentTargetFailures) {
+      if (exp <= now) recentTargetFailures.delete(k);
+    }
+    if (recentTargetFailures.size >= TARGET_FAILURE_MAP_MAX) {
+      const oldest = recentTargetFailures.keys().next().value;
+      if (oldest !== undefined) recentTargetFailures.delete(oldest);
+    }
+  }
+  recentTargetFailures.set(targetFailureKey(comboName, model), now + ttlMs);
+}
+
+export function clearTargetFailure(comboName, model) {
+  if (!model) return;
+  recentTargetFailures.delete(targetFailureKey(comboName, model));
+}
+
+/**
+ * Reset the short-term target-failure memory (tests / combo-settings resets).
+ * @param {string} [comboName] - Combo to clear; omit to clear everything.
+ */
+export function resetTargetFailureTracking(comboName) {
+  if (!comboName) {
+    recentTargetFailures.clear();
+    return;
+  }
+  const prefix = `${comboName}|`;
+  for (const key of recentTargetFailures.keys()) {
+    if (key.startsWith(prefix)) recentTargetFailures.delete(key);
+  }
+}
+
+function isTargetRecentlyFailed(comboName, model) {
+  // Two key layers: a combo-scoped mark (`${comboName}|${model}`) from an
+  // in-combo failure, and a GLOBAL mark (`|${model}`) recorded by layers that
+  // don't know the combo context (e.g. the degenerate-output guard in the
+  // stream, keyed as `${provider}/${model}`). A global mark demotes the
+  // target in every combo that lists it.
+  const keys = comboName ? [`${comboName}|${model}`, `|${model}`] : [`|${model}`];
+  const now = Date.now();
+  for (const key of keys) {
+    const exp = recentTargetFailures.get(key);
+    if (!exp) continue;
+    if (exp <= now) {
+      recentTargetFailures.delete(key);
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Stable-partition recently-failed targets to the back of the list. Only
+ * demotes when at least one healthy target exists, so an all-degraded combo
+ * keeps its configured order.
+ */
+function demoteRecentlyFailedTargets(models, comboName, log) {
+  if (!Array.isArray(models) || models.length <= 1) return models;
+  const healthy = [];
+  const degraded = [];
+  for (const m of models) {
+    (isTargetRecentlyFailed(comboName, m) ? degraded : healthy).push(m);
+  }
+  if (degraded.length === 0 || healthy.length === 0) return models;
+  log?.info?.("COMBO", `switch-fast: demoting recently-failed target(s) to back → ${degraded.join(", ")}`);
+  return [...healthy, ...degraded];
+}
 
 // Trailing run of items after the last assistant/model turn = the current user
 // turn. It may span several messages (e.g. text + image split across blocks),
@@ -265,19 +375,54 @@ export function getComboModelsFromData(modelStr, combosData) {
   return null;
 }
 
+// Merge abort signals (e.g. client disconnect + per-target timeout) into one.
+// Returns null when no usable signal is passed, a single signal unchanged.
+function combineSignals(...signals) {
+  const sources = signals.filter((s) => s && typeof s.addEventListener === "function");
+  if (sources.length === 0) return null;
+  if (sources.length === 1) return sources[0];
+
+  const controller = new AbortController();
+  // Forward the abort REASON so downstream handlers can distinguish a combo
+  // per-model timeout (and read its duration) from a plain client disconnect.
+  const onAbort = (evt) => {
+    const reason = evt?.target?.reason;
+    controller.abort(reason !== undefined ? reason : undefined);
+  };
+  let aborted = false;
+  let firstReason;
+
+  for (const sig of sources) {
+    if (sig.aborted) {
+      aborted = true;
+      firstReason = sig.reason;
+      break;
+    }
+    sig.addEventListener("abort", onAbort, { once: true });
+  }
+
+  if (aborted) {
+    controller.abort(firstReason !== undefined ? firstReason : undefined);
+  }
+
+  return controller.signal;
+}
+
 /**
  * Handle combo chat with fallback
  * @param {Object} options
  * @param {Object} options.body - Request body
  * @param {string[]} options.models - Array of model strings to try
- * @param {Function} options.handleSingleModel - Function to handle single model: (body, modelStr) => Promise<Response>
+ * @param {Function} options.handleSingleModel - Function to handle single model: (body, modelStr, options) => Promise<Response>
  * @param {Object} options.log - Logger object
  * @param {string} [options.comboName] - Name of the combo (for round-robin tracking)
  * @param {string} [options.comboStrategy] - Strategy: "fallback" or "round-robin"
  * @param {number|string} [options.comboStickyLimit=1] - Requests per combo model before switching
+ * @param {AbortSignal} [options.signal] - Optional external signal (e.g. client disconnect) that aborts every target
+ * @param {number} [options.timeoutMs=DEFAULT_COMBO_TARGET_TIMEOUT_MS] - Max time to wait for a target to return response headers
  * @returns {Promise<Response>}
  */
-export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true }) {
+export async function handleComboChat({ body, models, handleSingleModel, log, comboName, comboStrategy, comboStickyLimit = 1, autoSwitch = true, signal = null, timeoutMs = DEFAULT_COMBO_TARGET_TIMEOUT_MS }) {
   // Apply rotation strategy if enabled
   let rotatedModels = getRotatedModels(models, comboName, comboStrategy, comboStickyLimit);
 
@@ -292,21 +437,93 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       rotatedModels = reordered;
     }
   }
-  
+
+  // Switch-fast: push targets that recently timed out / errored to the back
+  // so the combo starts from a healthy model instead of re-burning degraded
+  // ones on every request (entries auto-expire; successes clear them).
+  rotatedModels = demoteRecentlyFailedTargets(rotatedModels, comboName, log);
+
+  // Dead models: a denied target (e.g. OpenCode "Free promotion has ended")
+  // is dead from every IP/account — skip it entirely for 30 min instead of
+  // failing every request on it. If EVERYTHING is denied, keep the original
+  // order (cheap re-probe) so the combo never returns without trying.
+  if (rotatedModels.length > 1) {
+    const alive = rotatedModels.filter((m) => !isTargetDeniedAliasAware(m));
+    if (alive.length > 0 && alive.length < rotatedModels.length) {
+      const skipped = rotatedModels.filter((m) => isTargetDeniedAliasAware(m));
+      log?.info?.("COMBO", `skipping denied (promotion ended / no access) target(s): ${skipped.join(", ")}`);
+      rotatedModels = alive;
+    }
+  }
+
   let lastError = null;
   let earliestRetryAfter = null;
-  let lastStatus = null;
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
+
+    // A caller abort means no consumer remains for a fallback response.
+    if (signal?.aborted) {
+      log.info("COMBO", "External signal aborted — stopping combo fallback");
+      return new Response(
+        JSON.stringify({ error: { message: "Client disconnected" } }),
+        { status: 499, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
     log.info("COMBO", `Trying model ${i + 1}/${rotatedModels.length}: ${modelStr}`);
 
     try {
-      const result = await handleSingleModel(body, modelStr);
+      let result;
+      if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+        result = await handleSingleModel(body, modelStr);
+      } else {
+        // Race the target against a header timeout: if it can't produce response
+        // headers within timeoutMs, stop waiting and fall back to the next target.
+        const timeoutController = new AbortController();
+        let timeoutId;
+        let timedOut = false;
+
+        const targetSignal = combineSignals(signal, timeoutController.signal);
+        const targetOptions = targetSignal ? { signal: targetSignal } : undefined;
+
+        const timeoutPromise = new Promise((resolve) => {
+          timeoutId = setTimeout(() => {
+            timedOut = true;
+            log.warn("COMBO", `Model ${modelStr} exceeded ${timeoutMs}ms timeout — falling back`);
+            noteTargetFailure(comboName, modelStr);
+            timeoutController.abort(new Error(`combo-per-model-timeout:${timeoutMs}`));
+            resolve(
+              new Response(
+                JSON.stringify({ error: { message: `Model ${modelStr} timed out` } }),
+                { status: 524, headers: { "Content-Type": "application/json" } }
+              )
+            );
+          }, timeoutMs);
+        });
+
+        try {
+          result = await Promise.race([
+            Promise.resolve(handleSingleModel(body, modelStr, targetOptions)).catch((err) => {
+              if (timedOut) {
+                // The inner call rejected because we aborted it. The synthetic 524
+                // from timeoutPromise already won the race; return an empty response
+                // so the loser branch resolves cleanly without leaking err.message.
+                return new Response(null, { status: 599 });
+              }
+              throw err;
+            }),
+            timeoutPromise,
+          ]);
+        } finally {
+          clearTimeout(timeoutId);
+        }
+      }
       
       // Success (2xx) - return response
       if (result.ok) {
         log.info("COMBO", `Model ${modelStr} succeeded`);
+        clearTargetFailure(comboName, modelStr);
         return result;
       }
 
@@ -332,17 +549,21 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       }
 
       // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      const fallbackDecision = checkFallbackError(result.status, errorText);
+      // A target-level 400 can mean model-specific schema/access incompatibility.
+      // Local request validation happens before combo expansion and remains 400.
+      const shouldFallback = result.status === 400 || fallbackDecision.shouldFallback;
+      const cooldownMs = fallbackDecision.cooldownMs;
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
         return result;
       }
 
-      // For transient errors (503/502/504), wait for cooldown before falling through
-      // so a briefly-overloaded provider gets a chance to recover rather than being
-      // skipped immediately (fixes: combo falls through on transient 503)
-      if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
+      // For transient errors (503/502/504), optionally wait for cooldown before
+      // falling through so a briefly-overloaded provider gets a chance to recover.
+      // Disabled by default (COMBO_TRANSIENT_WAIT_MS=0) to keep combo latency low.
+      if (cooldownMs && cooldownMs > 0 && cooldownMs <= COMBO_TRANSIENT_WAIT_MS &&
           (result.status === 503 || result.status === 502 || result.status === 504)) {
         log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
         await new Promise(r => setTimeout(r, cooldownMs));
@@ -350,22 +571,25 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
       // Fallback to next model
       lastError = errorText || String(result.status);
-      if (!lastStatus) lastStatus = result.status;
+      noteTargetFailure(comboName, modelStr);
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);
-      if (!lastStatus) lastStatus = 500;
+      noteTargetFailure(comboName, modelStr);
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
   }
 
   // All models failed
-  // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies
-  // the request itself is invalid, but here the providers are simply unavailable
-  // or have no active credentials. 503 is more accurate and retryable by clients.
-  const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
-  const status = allDisabled ? 503 : (lastStatus || 503);
+  // ALWAYS 503 (Service Unavailable): every fallback-eligible target was tried
+  // and failed, so the aggregate condition is "temporarily unavailable, retry
+  // later" — never the incidental status of the FIRST failing target. Leaking
+  // that status (e.g. 403 key_paused, 404, 502) makes clients classify the
+  // failure as permanent/non-retryable (harness: auth_failed retryable=false)
+  // even though a retry would route to a healthy target. Client-side errors
+  // (400/413/414/422/431) never reach here — they return early per-target.
+  const status = 503;
   const msg = lastError || "All combo models unavailable";
 
   if (earliestRetryAfter) {
@@ -476,9 +700,12 @@ const FUSION_DEFAULTS = {
 };
 
 // Resolve a Response (or {__error}) within ms; the loser keeps running but is ignored.
-function withTimeout(promise, ms) {
+function withTimeout(promise, ms, controller = null) {
   return new Promise((resolve) => {
-    const t = setTimeout(() => resolve({ __timeout: true }), ms);
+    const t = setTimeout(() => {
+      controller?.abort(new Error("fusion panel timeout"));
+      resolve({ __timeout: true });
+    }, ms);
     Promise.resolve(promise)
       .then((v) => { clearTimeout(t); resolve(v); })
       .catch((e) => { clearTimeout(t); resolve({ __error: e }); });
@@ -492,7 +719,7 @@ function withTimeout(promise, ms) {
  * still preferring a full panel when everyone is fast. Bounded by a hard timeout.
  * Returns a sparse array aligned to `calls` (undefined = not yet / dropped).
  */
-function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs }) {
+function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs, onFinish } = {}) {
   return new Promise((resolve) => {
     const out = new Array(calls.length);
     let settled = 0;
@@ -504,6 +731,7 @@ function collectPanel(calls, { minPanel, stragglerGraceMs, panelHardTimeoutMs })
       finished = true;
       clearTimeout(hardTimer);
       if (graceTimer) clearTimeout(graceTimer);
+      try { onFinish?.(); } catch { /* ignore abort errors */ }
       resolve(out);
     };
     const hardTimer = setTimeout(finish, panelHardTimeoutMs);
@@ -578,8 +806,19 @@ export async function handleFusionChat({ body, models, handleSingleModel, log, c
   }
 
   const t0 = Date.now();
-  const calls = panel.map((m) => withTimeout(handleSingleModel(panelBody, m, true), cfg.panelHardTimeoutMs));
-  const settled = await collectPanel(calls, { ...cfg, minPanel });
+  const panelControllers = panel.map(() => new AbortController());
+  const calls = panel.map((m, i) =>
+    withTimeout(
+      handleSingleModel(panelBody, m, true, { signal: panelControllers[i].signal }),
+      cfg.panelHardTimeoutMs,
+      panelControllers[i],
+    ),
+  );
+  const settled = await collectPanel(calls, {
+    ...cfg,
+    minPanel,
+    onFinish: () => { for (const c of panelControllers) c.abort(); },
+  });
   log.info("FUSION", `fan-out collected in ${Date.now() - t0}ms`);
 
   // 2. Collect successful answers.

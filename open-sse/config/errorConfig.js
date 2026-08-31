@@ -30,21 +30,42 @@ export const DEFAULT_ERROR_MESSAGES = {
 
 // Exponential backoff config for rate limits
 export const BACKOFF_CONFIG = {
-  base: 2000,
-  max: 5 * 60 * 1000,
+  // Rate-limit class base. Minimum initial model cooldown is 30 minutes —
+  // shorter locks (5m) caused hot retry loops against limits that had not
+  // lifted yet. Escalation beyond 30m is handled by model-lock accumulation
+  // (30m × 2^n) up to the 24h cap.
+  base: 30 * 60 * 1000,
+  max: 30 * 60 * 1000,
   maxLevel: 15
 };
 
 // Default cooldown for transient/unknown errors
-export const TRANSIENT_COOLDOWN_MS = 30 * 1000;
+export const TRANSIENT_COOLDOWN_MS = 30 * 60 * 1000;
+
+// Network timeouts (connect/TCP/header/idle) say nothing about sustained
+// account health — the endpoint was slow, not broken. Park the target briefly
+// with a FIXED short cooldown: never escalated and never accumulated into the
+// model-lock ladder (a few timeouts must not lock a key for half an hour,
+// poisoning every combo leg that lists the model).
+export const TIMEOUT_COOLDOWN_MS = 30 * 1000;
+
+// Timeout signature: statuses and error-text fragments that mark a failure as
+// a timeout rather than a provider rejection. Matched case-insensitively.
+export const TIMEOUT_STATUS_CODES = new Set([504, 524, 599]);
+export const TIMEOUT_ERROR_TEXT_RE =
+  /timeout|timed?[ -]?out|etimedout|econnaborted|und_err_(connect|headers|body|response)_timeout|connect timeout|headers timeout|idle timeout/;
 
 // Hard cap for provider-reported rate limit cooldown (e.g. codex resets_at can be 5-6h)
 export const MAX_RATE_LIMIT_COOLDOWN_MS = 30 * 60 * 1000;
 
-// Cooldown durations (ms)
+// Hard cap for accumulated model-lock cooldown: repeated failures on the same
+// model double the lock duration (base × 2^(n-1)) but never exceed 1 day.
+export const MAX_MODEL_LOCK_COOLDOWN_MS = 24 * 60 * 60 * 1000;
+
+// Cooldown durations (ms) — minimum initial model cooldown is 30 minutes
 const COOLDOWN = {
-  long: 2 * 60 * 1000,
-  short: 5 * 1000,
+  long: 30 * 60 * 1000,
+  short: 30 * 60 * 1000,
 };
 
 /**
@@ -58,6 +79,26 @@ const COOLDOWN = {
  */
 export const ERROR_RULES = [
   // --- Text-based rules (checked first, order = priority) ---
+  // Tuned from production error-log analysis (~14k classified errors):
+  //
+  // Free-tier KEY limits (orcarouter / opencode-zen / qoder): rate limit is
+  // per API key, recovery is slow. Park 30 minutes, escalate ×2 to the 24h
+  // cap; account fallback rotates to a healthy key meanwhile.
+  { text: "freeusagelimiterror", cooldownMs: 30 * 60 * 1000 },
+  { text: "free model capacity", cooldownMs: 30 * 60 * 1000 },
+  { text: "pricingurl", cooldownMs: 30 * 60 * 1000 },
+  //
+  // Dead credentials — these NEVER self-heal (token refresh permanently
+  // rejected / key revoked / balance exhausted). The old 2-minute lock let
+  // codex+orcarouter burn thousands of retries on corpses (4.5k/1.7k hits).
+  // Park long; accumulation still escalates to 24h for chronic offenders.
+  { text: "refresh_token_reused", cooldownMs: 30 * 60 * 1000 },
+  { text: "invalid api key", cooldownMs: 30 * 60 * 1000 },
+  { text: "insufficient balance", cooldownMs: 60 * 60 * 1000 },
+  //
+  // NOTE: plain 401 "Unauthorized" stays on the short 2-minute rule on
+  // purpose — transient 401s during background token rotation recover in
+  // seconds and must not idle a healthy key.
   { text: "no credentials",           cooldownMs: COOLDOWN.long },
   { text: "request not allowed",      cooldownMs: COOLDOWN.short },
   { text: "improperly formed request", cooldownMs: COOLDOWN.long },

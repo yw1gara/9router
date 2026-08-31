@@ -445,26 +445,24 @@ async function testOAuthConnection(connection, effectiveProxy = null) {
 }
 
 async function fetchWithConnectionProxy(url, options = {}, effectiveProxy = null) {
-  // Add a 15-second timeout to prevent connection testing from hanging indefinitely
-  // and exhausting the browser/Node.js connection pools.
-  if (!options.signal) {
-    options.signal = AbortSignal.timeout(15000);
-  }
+  // Every probe gets a hard deadline — one hanging upstream must not stall
+  // the whole One-by-One run (or a single Test button) for minutes.
+  const opts = { ...options, signal: options.signal || AbortSignal.timeout(15_000) };
 
   // Vercel relay: forward via relay URL
   if (effectiveProxy?.vercelRelayUrl) {
     const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
-    return proxyAwareFetch(url, options, {
+    return proxyAwareFetch(url, opts, {
       vercelRelayUrl: effectiveProxy.vercelRelayUrl,
     });
   }
 
   if (!effectiveProxy?.connectionProxyEnabled || !effectiveProxy?.connectionProxyUrl) {
-    return fetch(url, options);
+    return fetch(url, opts);
   }
 
   const { proxyAwareFetch } = await import("open-sse/utils/proxyFetch.js");
-  return proxyAwareFetch(url, options, {
+  return proxyAwareFetch(url, opts, {
     connectionProxyEnabled: true,
     connectionProxyUrl: effectiveProxy.connectionProxyUrl,
     connectionNoProxy: effectiveProxy.connectionNoProxy || "",
@@ -517,6 +515,21 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
 
   try {
     switch (connection.provider) {
+      case "freebuff": {
+        // Zero-cost probe: GET the session endpoint without an instance
+        // header — claims no session slot and burns no daily quota.
+        const res = await fetchWithConnectionProxy("https://www.codebuff.com/api/v1/freebuff/session", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${connection.apiKey}`,
+            "User-Agent": "ai-sdk/openai-compatible/1.0.0/codebuff",
+          },
+        }, effectiveProxy);
+        if (res.status === 401 || res.status === 403) {
+          return { valid: false, error: "Invalid or banned token" };
+        }
+        return { valid: true, error: null };
+      }
       case "cloudflare-ai": {
         const psd = connection.providerSpecificData || {};
         const accountId = psd.accountId;
@@ -759,6 +772,18 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
         const valid = res.status !== 401 && res.status !== 403;
         return { valid, error: valid ? null : "Invalid API key" };
       }
+      case "opencode-zen": {
+        // /v1/models is public and cannot validate a key. Probe a documented
+        // free model with one output token instead: no billing, while 401/403
+        // reliably distinguish missing/revoked credentials.
+        const res = await fetchWithConnectionProxy("https://opencode.ai/zen/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${connection.apiKey}` },
+          body: JSON.stringify({ model: "mimo-v2.5-free", messages: [{ role: "user", content: "ping" }], max_tokens: 1, stream: false }),
+        }, effectiveProxy);
+        const valid = res.status !== 401 && res.status !== 403;
+        return { valid, error: valid ? null : "Invalid API key" };
+      }
       case "xiaomi-mimo":
       case "xiaomi-tokenplan": {
         const baseUrls = { "xiaomi-mimo": "https://api.xiaomimimo.com/v1", "xiaomi-tokenplan": "https://token-plan-sgp.xiaomimimo.com/v1" };
@@ -815,8 +840,17 @@ case "llm7": {
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "Invalid API key", refreshed: false };
       }
-      default:
-        return { valid: false, error: "Provider test not supported" };
+      default: {
+        // Generic fallback: providers without a bespoke probe (e.g. orcarouter)
+        // declare a validateUrl in the registry — a GET with the Bearer key
+        // against it is enough to distinguish valid vs rejected credentials.
+        const validateUrl = PROVIDERS[connection.provider]?.validateUrl;
+        if (!validateUrl) return { valid: false, error: "Provider test not supported" };
+        const res = await fetchWithConnectionProxy(validateUrl, {
+          headers: { Authorization: `Bearer ${connection.apiKey}` },
+        }, effectiveProxy);
+        return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
+      }
     }
   } catch (err) {
     return { valid: false, error: err.message };

@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260831T105045429Z-919055-9dadb5c6c6d6",
+  "runId": "20260831T105045429Z-919055-9dadb5c6c6d6",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": [
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".",
+        "detail": "baseline capture had enumeration or snapshot errors",
+        "affectsCompletion": false
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "d15ed2a7dee4241fc4e75d90b5bab0f33e9ce335d238e4026306d5e4b99c6af4",
+  "rulesVersion": "unavailable",
+  "sessionHash": "27b3eb07bfa4ffe834a90714f292352a9b20674d8c9bbb7d8be7660695c3b1bb",
+  "reportRef": ".mimosa/reports/task-review-sess_15af7c34-7c8e-4b08-aa61-e1c3ddfc7d39-20260831T105045429Z-919055-9dadb5c6c6d6.json",
+  "events": [],
+  "observedFindingIds": [
+    "mimosa-fcb66946428f7ed09f5667dd"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "open-sse/utils/proxyFetch.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/sse/services/auth.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/lib/network/connectionProxy.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-31T10:50:45.871Z"
+}

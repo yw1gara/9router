@@ -1,0 +1,140 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260822T050949905Z-1730788-f45b707f7a85",
+  "runId": "20260822T050949905Z-1730788-f45b707f7a85",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "7e74228e197d3dbc2785db9f420571489684e1b1523d691988ccf16c761aa5c5",
+  "rulesVersion": "unavailable",
+  "sessionHash": "e14bde6b6b76da6439acd84cbcffe930f7747c3589675b781de1a20a42841546",
+  "reportRef": ".mimosa/reports/task-review-sess_d20ec933-2577-431c-bca1-41331a049b32-20260822T050949905Z-1730788-f45b707f7a85.json",
+  "events": [
+    {
+      "eventId": "hook-b90ac0b9cc858f2a4497e9d06f62c572",
+      "findingId": "mimosa-bb656abbf3b4bd76e3df5587",
+      "type": "finding_observed",
+      "at": "2026-08-22T04:49:43.331Z",
+      "identity": {
+        "projectRelativeFile": "src/lib/network/connectionProxy.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 79,
+      "endLine": 79,
+      "reasonCode": "advisory",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-540eec818033538480199166997ac543",
+      "findingId": "mimosa-8e06c75ace27716ec4e1f2ba",
+      "type": "finding_observed",
+      "at": "2026-08-22T04:49:43.331Z",
+      "identity": {
+        "projectRelativeFile": "src/lib/network/connectionProxy.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 83,
+      "endLine": 83,
+      "reasonCode": "advisory",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff"
+      },
+      "sequence": 1
+    },
+    {
+      "eventId": "hook-676554285d51fe38fd2b539295afccb7",
+      "findingId": "mimosa-bb656abbf3b4bd76e3df5587",
+      "type": "finding_observed",
+      "at": "2026-08-22T05:09:49.905Z",
+      "identity": {
+        "projectRelativeFile": "src/lib/network/connectionProxy.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 71,
+      "endLine": 71,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63"
+      },
+      "sequence": 2
+    },
+    {
+      "eventId": "hook-d10d1ee900908c8332c437108510dc1a",
+      "findingId": "mimosa-8e06c75ace27716ec4e1f2ba",
+      "type": "finding_observed",
+      "at": "2026-08-22T05:09:49.905Z",
+      "identity": {
+        "projectRelativeFile": "src/lib/network/connectionProxy.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 75,
+      "endLine": 75,
+      "reasonCode": "observe",
+      "reportedToAgent": false,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff"
+      },
+      "sequence": 3
+    }
+  ],
+  "observedFindingIds": [
+    "mimosa-bb656abbf3b4bd76e3df5587",
+    "mimosa-8e06c75ace27716ec4e1f2ba",
+    "mimosa-fcb66946428f7ed09f5667dd"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "src/lib/network/connectionProxy.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "tests/unit/github-monthly-usage-lock.test.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "tests/unit/model-lock-accumulation.test.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-22T05:09:50.338Z"
+}

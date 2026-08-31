@@ -41,12 +41,19 @@ function isBlockedIpv6(host) {
   const v4Mapped = h.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
   if (v4Mapped) return isBlockedIpv4(v4Mapped[1]);
   if (h === "::1" || h === "::") return true;
+  // Node URL canonicalizes IPv4-mapped IPv6 loopback/private addresses to
+  // hexadecimal (for example ::ffff:7f00:1), so reject the entire mapped
+  // range instead of matching only dotted-decimal spellings.
+  if (h.startsWith("::ffff:")) return true;
   return h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd");
 }
 
 // Throw if URL targets a non-public host. Caller should map to 400.
 export function assertPublicUrl(rawUrl) {
   const parsed = new URL(rawUrl);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Blocked URL: protocol must be http or https");
+  }
   const host = parsed.hostname.toLowerCase();
 
   if (BLOCKED_HOSTNAMES.has(host)) throw new Error("Blocked URL: internal host");

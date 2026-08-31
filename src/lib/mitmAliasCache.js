@@ -32,15 +32,21 @@ export async function syncToJson() {
 }
 
 // Update cache for a single tool after UI saves to DB
+// Serialize writes so concurrent PATCHes to different tools do not lose each
+// other's updates (read-modify-write without a lock is a classic lost-update).
+let writeLock = Promise.resolve();
+
 export function writeAliasForTool(tool, mappings) {
-  try {
-    let current = {};
-    if (fs.existsSync(CACHE_FILE)) {
-      try { current = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); } catch { /* corrupted → reset */ }
+  writeLock = writeLock.then(async () => {
+    try {
+      let current = {};
+      if (fs.existsSync(CACHE_FILE)) {
+        try { current = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8")); } catch { /* corrupted → reset */ }
+      }
+      current[tool] = mappings || {};
+      writeAtomic(current);
+    } catch (e) {
+      console.log("[mitmAliasCache] write failed:", e.message);
     }
-    current[tool] = mappings || {};
-    writeAtomic(current);
-  } catch (e) {
-    console.log("[mitmAliasCache] write failed:", e.message);
-  }
+  }).catch(() => {});
 }

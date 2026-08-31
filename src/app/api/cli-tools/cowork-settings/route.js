@@ -8,6 +8,7 @@ import crypto from "crypto";
 import { DEFAULT_PLUGINS, LOCAL_STDIO_PLUGINS, buildManagedMcpServers } from "@/shared/constants/coworkPlugins";
 import { UPDATER_CONFIG } from "@/shared/constants/config";
 import { getConsistentMachineId } from "@/shared/utils/machineId";
+import { assertPublicUrl } from "@/shared/utils/ssrfGuard";
 
 const APP_PORT = UPDATER_CONFIG.appPort;
 const CLI_TOKEN_HEADER = "x-9r-cli-token";
@@ -129,7 +130,13 @@ const read1pConfig = async () => {
 
 const write1pConfig = async (cfg) => {
   await fs.mkdir(get1pRoot(), { recursive: true });
-  await fs.writeFile(get1pConfigPath(), JSON.stringify(cfg, null, 2));
+  // Atomic write: a crash or concurrent reader must never see a partially
+  // written JSON (which read1pConfig would treat as an empty config and then
+  // re-bootstrap on top of).
+  const target = get1pConfigPath();
+  const tmp = `${target}.${process.pid}.tmp`;
+  await fs.writeFile(tmp, JSON.stringify(cfg, null, 2));
+  await fs.rename(tmp, target);
 };
 
 const bootstrapDeploymentMode = async () => {
@@ -184,6 +191,9 @@ const buildCustomEntries = (customPlugins) => {
   const out = [];
   for (const p of customPlugins) {
     if (!p?.name || !p?.url) continue;
+    // Custom MCP endpoints are user-supplied URLs — block internal/private
+    // hosts (SSRF) before persisting them into the managed config.
+    try { assertPublicUrl(p.url); } catch { continue; }
     out.push({ name: p.name, url: p.url, transport: p.transport || "sse", custom: true });
   }
   return out;
@@ -237,7 +247,11 @@ async function writeSkipApprovals(managedServers) {
   }
   cfg.operonSkipMcpApprovals = skip;
   await fs.mkdir(getWriteRoot(), { recursive: true });
-  await fs.writeFile(cfgPath, JSON.stringify(cfg, null, 2));
+  // Atomic write — same rationale as write1pConfig: a truncated JSON makes the
+  // GET route report Cowork as unconfigured while meta still points here.
+  const cfgTmp = `${cfgPath}.${process.pid}.tmp`;
+  await fs.writeFile(cfgTmp, JSON.stringify(cfg, null, 2));
+  await fs.rename(cfgTmp, cfgPath);
   return { written: Object.keys(skip).length };
 }
 
@@ -343,7 +357,10 @@ export async function POST(request) {
     };
     if (managedMcpServers.length > 0) newConfig.managedMcpServers = managedMcpServers;
 
-    await fs.writeFile(configPath, JSON.stringify(newConfig, null, 2));
+    await fs.mkdir(getWriteConfigDir(), { recursive: true });
+    const cfgTmp = `${configPath}.${process.pid}.tmp`;
+    await fs.writeFile(cfgTmp, JSON.stringify(newConfig, null, 2));
+    await fs.rename(cfgTmp, configPath);
 
     let skipResult = null;
     try { skipResult = await writeSkipApprovals(managedMcpServers); } catch (e) { skipResult = { error: e.message }; }

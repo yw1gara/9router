@@ -38,6 +38,13 @@ export function ensureToolCallIds(body) {
         if (!tc.type) {
           tc.type = "function";
         }
+        // Some clients (e.g. dsh) emit tool calls with an empty function name
+        // after a malformed model turn; strict OpenAI-compatible upstreams
+        // reject the whole request for it. Substitute a placeholder so the
+        // paired tool response stays referencable.
+        if (!tc.function?.name) {
+          tc.function = { ...(tc.function || {}), name: "unknown_tool" };
+        }
         // Ensure arguments is JSON string, not object
         if (tc.function?.arguments && typeof tc.function.arguments !== "string") {
           tc.function.arguments = JSON.stringify(tc.function.arguments);
@@ -49,6 +56,12 @@ export function ensureToolCallIds(body) {
     if (msg.role === "tool" && msg.tool_call_id && !TOOL_ID_PATTERN.test(msg.tool_call_id)) {
       const sanitized = sanitizeToolId(msg.tool_call_id);
       msg.tool_call_id = sanitized || generateToolCallId(i, 0);
+    }
+    // A tool response with no tool_call_id at all makes strict upstreams
+    // reject the request ("missing field tool_call_id"). Re-attach it to the
+    // nearest preceding unanswered assistant tool_call, else synthesize one.
+    if (msg.role === "tool" && !msg.tool_call_id) {
+      msg.tool_call_id = resolveOrphanToolCallId(body.messages, i);
     }
 
     // Also validate tool_use blocks in content (Claude format)
@@ -69,6 +82,26 @@ export function ensureToolCallIds(body) {
   }
 
   return body;
+}
+
+// Find a tool_call id for an orphan tool response: the nearest preceding
+// assistant message whose tool_calls have not been answered by an explicit
+// tool_call_id yet. Falls back to a synthetic id so the wire stays valid.
+function resolveOrphanToolCallId(messages, index) {
+  const answered = new Set();
+  for (let i = 0; i < index; i++) {
+    if (messages[i].role === "tool" && messages[i].tool_call_id) {
+      answered.add(messages[i].tool_call_id);
+    }
+  }
+  for (let i = index - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg.role !== "assistant" || !Array.isArray(msg.tool_calls)) continue;
+    for (const tc of msg.tool_calls) {
+      if (tc?.id && !answered.has(tc.id)) return tc.id;
+    }
+  }
+  return generateToolCallId(index, 0);
 }
 
 // Get tool_call ids from assistant message (OpenAI format: tool_calls, Claude format: tool_use in content)

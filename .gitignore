@@ -86,3 +86,6 @@ graphify-out/*
 .codegraph/
 .PR/
 .next-analyze/*
+
+# local agent tooling state
+.claude-flow/

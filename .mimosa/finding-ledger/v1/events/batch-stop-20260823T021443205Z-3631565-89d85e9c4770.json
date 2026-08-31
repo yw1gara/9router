@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260823T021443205Z-3631565-89d85e9c4770",
+  "runId": "20260823T021443205Z-3631565-89d85e9c4770",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "d05a47fff8660700ce2eb657c7e8e582c34cf1a3689f351ffee379423a5492cb",
+  "rulesVersion": "unavailable",
+  "sessionHash": "e14bde6b6b76da6439acd84cbcffe930f7747c3589675b781de1a20a42841546",
+  "reportRef": ".mimosa/reports/task-review-sess_d20ec933-2577-431c-bca1-41331a049b32-20260823T021443205Z-3631565-89d85e9c4770.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "open-sse/services/combo.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/sse/services/auth.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "src/sse/handlers/chat.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "open-sse/services/accountFallback.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    },
+    {
+      "file": "tests/unit/model-lock-accumulation.test.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-23T02:14:43.644Z"
+}

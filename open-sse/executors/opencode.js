@@ -9,6 +9,9 @@ const OPENCODE_UA = "opencode";
 // Models served by /zen/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set(["muse-spark-1.2-contributor-free"]);
 
+// OpenCode free tier limits requests per egress IP (VansRouter parity).
+const IP_LIMIT_BODY = /limit|rate|quota|exhausted|capacity|too many|retry/i;
+
 function generateRequestId() {
   return `msg_${crypto.randomUUID().replace(/-/g, "")}`;
 }
@@ -93,7 +96,6 @@ export class OpenCodeExecutor extends BaseExecutor {
     const raw = credentials?.rawHeaders || {};
     const lower = {};
     for (const [k, v] of Object.entries(raw)) lower[k.toLowerCase()] = v;
-
     const downstreamUa = lower["user-agent"] || "";
     const isOpencodeDownstream = downstreamUa.toLowerCase().includes("opencode");
 
@@ -107,5 +109,30 @@ export class OpenCodeExecutor extends BaseExecutor {
       "x-opencode-project": lower["x-opencode-project"] || "global",
       "Accept": stream ? "text/event-stream" : "*/*",
     };
+  }
+
+  // VansRouter-style pool-scoped classification so chatCore rotates the proxy
+  // pool instead of failing the account. Covers both per-IP walls:
+  //  - 429/403 with limit-ish body text (VansRouter's original rule)
+  //  - 401 "Free promotion has ended" (OpenCode ends free promotions per
+  //    egress IP — another pool's IP may still have the promotion)
+  parseError(response, bodyText) {
+    const status = response?.status || 0;
+    const text = String(bodyText || "");
+    if ((status === 429 || status === 403) && IP_LIMIT_BODY.test(text)) {
+      return {
+        status,
+        message: text.slice(0, 300) || `OpenCode free limit (${status})`,
+        poolScoped: { reason: "ip-limit" },
+      };
+    }
+    if (status === 401 && /free promotion has ended|promotion has ended/i.test(text)) {
+      return {
+        status,
+        message: text.slice(0, 300) || "OpenCode free promotion has ended",
+        poolScoped: { reason: "promotion-ended" },
+      };
+    }
+    return null;
   }
 }

@@ -59,6 +59,45 @@ function shouldMergeProviderSpecificData(existing, incoming, hasLegacyProxy, has
   return existing !== undefined || incoming !== undefined || hasLegacyProxy || hasProxyPoolField;
 }
 
+const ROTATION_STRATEGIES = new Set(["fixed", "round-robin", "random", "smart"]);
+// Smart rotation spreads accounts across the full pool inventory, so the
+// per-connection cap must accommodate large imported pools. Env-tunable:
+// MAX_POOLS_PER_CONNECTION (default 500).
+const MAX_POOLS_PER_CONNECTION = (() => {
+  const n = parseInt(process.env.MAX_POOLS_PER_CONNECTION, 10);
+  return Number.isFinite(n) && n > 0 ? n : 500;
+})();
+
+// Multi-pool assignment: validate every id, dedupe, cap the list size.
+async function normalizeMultiPoolUpdate(body) {
+  if (body?.proxyPoolIds === undefined) {
+    return { hasField: false, strategy: null, proxyRequired: null, poolIds: null };
+  }
+  if (!Array.isArray(body.proxyPoolIds)) {
+    return { hasField: true, error: "proxyPoolIds must be an array" };
+  }
+  if (body.proxyRotationStrategy !== undefined && !ROTATION_STRATEGIES.has(body.proxyRotationStrategy)) {
+    return { hasField: true, error: `Invalid proxyRotationStrategy (allowed: ${[...ROTATION_STRATEGIES].join(", ")})` };
+  }
+  const raw = body.proxyPoolIds;
+  if (raw.length === 0) {
+    return { hasField: true, strategy: null, proxyRequired: null, poolIds: [] };
+  }
+  const ids = [...new Set(raw.map((v) => String(v).trim()).filter(Boolean))];
+  if (ids.length > MAX_POOLS_PER_CONNECTION) {
+    return { hasField: true, error: `Too many pools (max ${MAX_POOLS_PER_CONNECTION})` };
+  }
+  for (const pid of ids) {
+    const pool = await getProxyPoolById(pid);
+    if (!pool) return { hasField: true, error: `Proxy pool not found: ${pid}` };
+  }
+  const strategy = body.proxyRotationStrategy !== undefined
+    ? (ROTATION_STRATEGIES.has(body.proxyRotationStrategy) ? body.proxyRotationStrategy : "fixed")
+    : null;
+  const proxyRequired = typeof body.proxyRequired === "boolean" ? body.proxyRequired : null;
+  return { hasField: true, strategy, proxyRequired, poolIds: ids };
+}
+
 // GET /api/providers/[id] - Get single connection
 export async function GET(request, { params }) {
   try {
@@ -116,6 +155,11 @@ export async function PUT(request, { params }) {
       return NextResponse.json({ error: proxyPoolResult.error }, { status: 400 });
     }
 
+    const multiPoolResult = await normalizeMultiPoolUpdate(body);
+    if (multiPoolResult.error) {
+      return NextResponse.json({ error: multiPoolResult.error }, { status: 400 });
+    }
+
     const updateData = {};
     if (name !== undefined) updateData.name = name;
     if (priority !== undefined) updateData.priority = priority;
@@ -133,12 +177,19 @@ export async function PUT(request, { params }) {
         providerSpecificData,
         proxyConfig.hasAnyProxyField,
         proxyPoolResult.hasProxyPoolField
-      )
+      ) || multiPoolResult.hasField
     ) {
       updateData.providerSpecificData = {
         ...(existing.providerSpecificData || {}),
         ...(providerSpecificData || {}),
       };
+
+      // A null marker means "the user turned this off manually" — remove the
+      // monitor's autoQuotaDisabled flag so the background monitor cannot
+      // re-enable the connection against the user's intent.
+      if (updateData.providerSpecificData.autoQuotaDisabled === null) {
+        delete updateData.providerSpecificData.autoQuotaDisabled;
+      }
 
       if (proxyConfig.hasAnyProxyField) {
         updateData.providerSpecificData.connectionProxyEnabled = proxyConfig.connectionProxyEnabled;
@@ -147,10 +198,35 @@ export async function PUT(request, { params }) {
       }
 
       if (proxyPoolResult.hasProxyPoolField) {
+        // Choosing a single pool (or None) is an explicit mode switch away from
+        // multi-pool rotation: clear the multi-pool assignment, otherwise the
+        // resolver keeps prioritizing proxyPoolIds and the selection is ignored.
+        if (updateData.providerSpecificData.proxyPoolIds) {
+          delete updateData.providerSpecificData.proxyPoolIds;
+        }
+        if (updateData.providerSpecificData.proxyRotationStrategy) {
+          delete updateData.providerSpecificData.proxyRotationStrategy;
+        }
         if (proxyPoolResult.proxyPoolId === null) {
           delete updateData.providerSpecificData.proxyPoolId;
         } else {
           updateData.providerSpecificData.proxyPoolId = proxyPoolResult.proxyPoolId;
+        }
+      }
+
+      if (multiPoolResult.hasField) {
+        if (multiPoolResult.poolIds.length === 0) {
+          delete updateData.providerSpecificData.proxyPoolIds;
+          delete updateData.providerSpecificData.proxyRotationStrategy;
+          delete updateData.providerSpecificData.proxyRequired;
+        } else {
+          updateData.providerSpecificData.proxyPoolIds = multiPoolResult.poolIds;
+          if (multiPoolResult.strategy) {
+            updateData.providerSpecificData.proxyRotationStrategy = multiPoolResult.strategy;
+          }
+          if (multiPoolResult.proxyRequired !== null) {
+            updateData.providerSpecificData.proxyRequired = multiPoolResult.proxyRequired;
+          }
         }
       }
     }

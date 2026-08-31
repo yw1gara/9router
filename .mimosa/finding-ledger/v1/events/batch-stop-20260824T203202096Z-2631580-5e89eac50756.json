@@ -1,0 +1,29 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260824T203202096Z-2631580-5e89eac50756",
+  "runId": "20260824T203202096Z-2631580-5e89eac50756",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "5ecd2a09cc5b872268d0f4839dfdf2c9e572a47df4bbdb4e1754511e39ae0e5f",
+  "rulesVersion": "unavailable",
+  "sessionHash": "f7623eb6e70d952a3b4a2b6199f3523861b946ecab37a179044351f077523bdf",
+  "reportRef": ".mimosa/reports/task-review-sess_395af2d1-f004-4d30-9718-6347ce3f154d-20260824T203202096Z-2631580-5e89eac50756.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [
+    {
+      "file": "open-sse/utils/circuitBreaker.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-24T20:32:02.504Z"
+}

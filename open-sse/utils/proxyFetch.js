@@ -117,6 +117,19 @@ function normalizeString(value) {
   return String(value).trim();
 }
 
+function proxyLogContext(targetUrl, proxyOptions) {
+  let target = "unknown";
+  try {
+    const parsed = new URL(targetUrl);
+    target = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+  } catch { /* keep unknown target */ }
+  const provider = normalizeString(proxyOptions?.provider) || "unknown";
+  const model = normalizeString(proxyOptions?.model) || "unknown";
+  const connection = normalizeString(proxyOptions?.connectionName || proxyOptions?.connectionId) || "unknown";
+  const pool = normalizeString(proxyOptions?.proxyPoolId) || "none";
+  return `provider=${provider} model=${model} conn=${connection} pool=${pool} target=${target}`;
+}
+
 /**
  * Resolve real IP using Google DNS (bypass system DNS)
  */
@@ -303,12 +316,28 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       "x-relay-target": `${parsed.protocol}//${parsed.host}`,
       "x-relay-path": `${parsed.pathname}${parsed.search}`,
     };
-    return originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders });
+    try {
+      return await originalFetch(vercelRelayUrl, { ...options, headers: relayHeaders });
+    } catch (relayError) {
+      const message = `[ProxyFetch] Relay proxy failed | ${proxyLogContext(targetUrl, proxyOptions)} | ${relayError.message}`;
+      console.warn(message);
+      if (proxyOptions?.strictProxy === true || proxyOptions?.proxyRequired === true || proxyOptions?.smartProxy === true) {
+        throw new Error(message, { cause: relayError });
+      }
+      throw relayError;
+    }
   }
 
   const connectionProxyUrl = resolveConnectionProxyUrl(targetUrl, proxyOptions);
   const envProxyUrl = connectionProxyUrl ? null : normalizeProxyUrl(getEnvProxyUrl(targetUrl));
   const proxyUrl = connectionProxyUrl || envProxyUrl;
+
+  // Fail-closed: the connection declared proxy egress mandatory, yet no
+  // usable proxy URL resolved (missing pool, inactive pool, empty config).
+  // Never silently egress direct in that case.
+  if (!proxyUrl && proxyOptions?.proxyRequired === true) {
+    throw new Error(`[ProxyFetch] Proxy required but none resolved (proxyRequired=true) — refusing direct egress | ${proxyLogContext(targetUrl, proxyOptions)}`);
+  }
 
   // MITM DNS bypass: for known MITM-intercepted hosts, resolve real IP to avoid DNS spoof
   if (shouldBypassMitmDns(targetUrl)) {
@@ -318,11 +347,14 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
         const dispatcher = await getDispatcher(proxyUrl);
         return await originalFetch(url, { ...options, dispatcher });
       } catch (proxyError) {
-        if (proxyOptions?.strictProxy === true) {
-          throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
+        if (proxyOptions?.strictProxy === true || proxyOptions?.proxyRequired === true || proxyOptions?.smartProxy === true) {
+          throw new Error(`[ProxyFetch] Smart proxy failed | ${proxyLogContext(targetUrl, proxyOptions)} | ${proxyError.message}`);
         }
-        console.warn(`[ProxyFetch] Proxy failed, falling back to direct bypass: ${proxyError.message}`);
+        console.warn(`[ProxyFetch] Proxy failed | ${proxyLogContext(targetUrl, proxyOptions)} | ${proxyError.message}`);
       }
+    }
+    if (proxyOptions?.proxyRequired === true || proxyOptions?.smartProxy === true) {
+      throw new Error(`[ProxyFetch] Smart proxy unavailable — refusing direct egress | ${proxyLogContext(targetUrl, proxyOptions)}`);
     }
     // No proxy — manually resolve real IP to bypass DNS spoof
     try {
@@ -340,10 +372,13 @@ export async function proxyAwareFetch(url, options = {}, proxyOptions = null) {
       return await originalFetch(url, { ...options, dispatcher });
     } catch (proxyError) {
       // If strictProxy is enabled, fail hard instead of falling back to direct
-      if (proxyOptions?.strictProxy === true) {
-        throw new Error(`[ProxyFetch] Proxy required but failed (strictProxy=true): ${proxyError.message}`);
+      if (proxyOptions?.strictProxy === true || proxyOptions?.proxyRequired === true || proxyOptions?.smartProxy === true) {
+        throw new Error(`[ProxyFetch] Smart proxy failed | ${proxyLogContext(targetUrl, proxyOptions)} | ${proxyError.message}`, { cause: proxyError });
       }
-      console.warn(`[ProxyFetch] Proxy failed, falling back to direct: ${proxyError.message}`);
+      console.warn(`[ProxyFetch] Proxy failed | ${proxyLogContext(targetUrl, proxyOptions)} | ${proxyError.message}`);
+      if (proxyOptions?.smartProxy === true || proxyOptions?.proxyRequired === true || proxyOptions?.strictProxy === true) {
+        throw proxyError;
+      }
       return originalFetch(url, options);
     }
   }

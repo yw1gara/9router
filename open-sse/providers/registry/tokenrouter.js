@@ -10,11 +10,12 @@ export default {
     textIcon: "TR",
     website: "https://www.tokenrouter.com",
     notice: {
-      text: "OpenAI-compatible gateway. 300+ models (OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi, GLM, dsb).",
+      text: "OpenAI-compatible gateway, 300+ models (OpenAI, Claude, Gemini, Qwen, DeepSeek, Kimi, GLM, dsb). Free tier: $0-priced models (e.g. kimi-k3-free, nemotron-3-nano:free) — check /v1/models pricingType; limits are per API key, daily quota resets 00:00 UTC+8.",
       apiKeyUrl: "https://www.tokenrouter.com",
     },
   },
-  category: "apikey",
+  category: "freeTier",
+  hasFree: true,
   thinkingConfig: {
     options: ["low", "medium", "high", "xhigh", "max"],
     defaultMode: "high",

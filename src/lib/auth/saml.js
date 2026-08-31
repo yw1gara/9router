@@ -145,8 +145,13 @@ export async function validateSamlResponse(request, body, expectedRequestId, set
     throw new Error("Missing SAMLResponse parameter in assertion POST body");
   }
 
-  // Parse response XML to inspect InResponseTo for replay protection
-  if (expectedRequestId) {
+  // Parse response XML to inspect InResponseTo for replay protection. The ACS
+  // flow must always provide a request ID; accepting an empty expectation would
+  // allow unsolicited or replayed assertions to create a dashboard session.
+  if (!expectedRequestId) {
+    throw new Error("Missing SAML request state");
+  }
+  {
     const xml = Buffer.from(rawSamlResponse, "base64").toString("utf8");
     const match = xml.match(/InResponseTo=["']([^"']+)["']/i);
     const inResponseTo = match ? match[1] : null;

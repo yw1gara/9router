@@ -1,6 +1,6 @@
 // Re-export from open-sse with local logger
 import * as log from "../utils/logger.js";
-import { updateProviderConnection } from "../../lib/localDb.js";
+import { updateProviderConnection, getProviderConnectionById } from "../../lib/localDb.js";
 import {
   getProjectIdForConnection,
   invalidateProjectId,
@@ -20,7 +20,8 @@ import {
   formatProviderCredentials as _formatProviderCredentials,
   getAllAccessTokens as _getAllAccessTokens,
   refreshKiroToken as _refreshKiroToken,
-  getRefreshLeadMs as _getRefreshLeadMs
+  getRefreshLeadMs as _getRefreshLeadMs,
+  isUnrecoverableRefreshError as _isUnrecoverableRefreshError,
 } from "open-sse/services/tokenRefresh.js";
 import {
   refreshProviderCredentials as _refreshProviderCredentials,
@@ -127,7 +128,7 @@ function _refreshProjectId(provider, connectionId, accessToken) {
   // Evict the stale cached entry so getProjectIdForConnection does a real fetch
   invalidateProjectId(connectionId);
 
-  getProjectIdForConnection(connectionId, accessToken)
+  getProjectIdForConnection(connectionId, accessToken, provider)
     .then((projectId) => {
       if (!projectId) return;
       updateProviderCredentials(connectionId, { projectId }).catch((err) => {
@@ -237,8 +238,57 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
       lastRefreshAt: creds.lastRefreshAt || null,
     });
 
-    const newCreds = await _refreshProviderCredentials(provider, creds, log);
-    if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
+    // getCurrentCredentials: lets the refresh lock re-read the persisted row
+    // after acquisition, so a concurrent refresh's rotated tokens are reused
+    // instead of refreshing again with this (possibly consumed) snapshot.
+    // The predicate keeps force=true (background scheduler, larger lead)
+    // authoritative — the re-check must not cancel a forced proactive refresh.
+    const getCurrentCredentials = creds.connectionId
+      ? async () => getProviderConnectionById(creds.connectionId)
+      : null;
+    const isRefreshStillNeeded = (latest) => Boolean(force) || _shouldRefreshCredentials(provider, latest || creds);
+    const newCreds = await _refreshProviderCredentials(provider, creds, log, getCurrentCredentials, isRefreshStillNeeded);
+    if (_isUnrecoverableRefreshError(newCreds)) {
+      // Refresh token was consumed/rejected upstream (rotating providers like
+      // Codex). Re-read the row before marking: a concurrent refresh may have
+      // already rotated the token, in which case this failure is a stale-snapshot
+      // race and the connection is actually healthy with the newer token.
+      const latest = creds.connectionId
+        ? await getProviderConnectionById(creds.connectionId)
+        : null;
+      const tokenRotated =
+        latest?.refreshToken && creds.refreshToken && latest.refreshToken !== creds.refreshToken;
+      if (tokenRotated) {
+        log.warn("TOKEN_REFRESH", "Refresh failed with stale token — connection already rotated, skipping mark", {
+          provider,
+          connectionId: creds.connectionId,
+          code: newCreds.code || newCreds.error,
+        });
+        creds = {
+          ...creds,
+          ...latest,
+          providerSpecificData: latest.providerSpecificData ?? creds.providerSpecificData,
+        };
+      } else {
+        const reason = `Authentication token invalidated (${newCreds.code || newCreds.error}) — re-authentication required`;
+        log.error("TOKEN_REFRESH", reason, { provider, connectionId: creds.connectionId });
+        if (creds.connectionId) {
+          await updateProviderConnection(creds.connectionId, {
+            testStatus: "unavailable",
+            lastError: reason,
+            errorCode: 401,
+            lastErrorAt: new Date().toISOString(),
+          });
+        }
+        creds = {
+          ...creds,
+          testStatus: "unavailable",
+          lastError: reason,
+          errorCode: 401,
+          lastErrorAt: new Date().toISOString(),
+        };
+      }
+    } else if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken) {
       const mergedCreds = {
         ...newCreds,
         existingProviderSpecificData: creds.providerSpecificData,

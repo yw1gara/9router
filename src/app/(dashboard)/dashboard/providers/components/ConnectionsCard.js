@@ -4,30 +4,8 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
-
-// ── CooldownTimer ──────────────────────────────────────────────
-function CooldownTimer({ until }) {
-  const [remaining, setRemaining] = useState("");
-
-  useEffect(() => {
-    const update = () => {
-      const diff = new Date(until).getTime() - Date.now();
-      if (diff <= 0) { setRemaining(""); return; }
-      const s = Math.floor(diff / 1000);
-      if (s < 60) setRemaining(`${s}s`);
-      else if (s < 3600) setRemaining(`${Math.floor(s / 60)}m ${s % 60}s`);
-      else setRemaining(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
-    };
-    update();
-    const t = setInterval(update, 1000);
-    return () => clearInterval(t);
-  }, [until]);
-
-  if (!remaining) return null;
-  return <span className="text-xs text-orange-500 font-mono">⏱ {remaining}</span>;
-}
-
-CooldownTimer.propTypes = { until: PropTypes.string.isRequired };
+import ModelLockChips from "./ModelLockChips";
+import ConnectionErrorBadge from "./ConnectionErrorBadge";
 
 // ── ConnectionRow ──────────────────────────────────────────────
 function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete }) {
@@ -60,20 +38,28 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
   const proxyBadgeVariant = boundProxyPool?.isActive === true ? "success" : (boundProxyPoolId || hasLegacyProxy) ? "error" : "default";
 
   const modelLockUntil = Object.entries(connection)
-    .filter(([k]) => k.startsWith("modelLock_"))
-    .map(([, v]) => v).filter(Boolean).sort()[0] || null;
+    .filter(([k, v]) => k.startsWith("modelLock_") && v && Number.isFinite(new Date(v).getTime()))
+    .map(([, v]) => new Date(v).getTime())
+    .sort((a, b) => a - b)[0] || null;
 
   useEffect(() => {
+    let t = null;
     const check = () => {
       const until = Object.entries(connection)
         .filter(([k]) => k.startsWith("modelLock_"))
         .map(([, v]) => v).filter(v => v && new Date(v).getTime() > Date.now()).sort()[0] || null;
       setIsCooldown(!!until);
+      // Self-clear: stop ticking once no lock is active (stale expired keys
+      // would otherwise keep this interval alive forever at 1 Hz).
+      if (!until && t) {
+        clearInterval(t);
+        t = null;
+      }
     };
     check();
-    const t = modelLockUntil ? setInterval(check, 1000) : null;
+    if (modelLockUntil) t = setInterval(check, 1000);
     return () => { if (t) clearInterval(t); };
-  }, [modelLockUntil]);
+  }, [modelLockUntil, connection]);
 
   useEffect(() => {
     if (!showProxyDropdown) return;
@@ -85,7 +71,9 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
     return () => document.removeEventListener("mousedown", handler);
   }, [showProxyDropdown]);
 
-  const effectiveStatus = connection.testStatus === "unavailable" && !isCooldown ? "active" : connection.testStatus;
+  // Model cooldown is distinct from account availability. Never relabel an
+  // account-wide unavailable state as active just because its model lock ended.
+  const effectiveStatus = connection.testStatus;
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
@@ -118,10 +106,8 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
               {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
             </Badge>
             {hasAnyProxy && <Badge variant={proxyBadgeVariant} size="sm">Proxy</Badge>}
-            {isCooldown && connection.isActive !== false && <CooldownTimer until={modelLockUntil} />}
-            {connection.lastError && connection.isActive !== false && (
-              <span className="text-xs text-red-500 truncate max-w-[300px]" title={connection.lastError}>{connection.lastError}</span>
-            )}
+            {connection.isActive !== false && <ModelLockChips connection={connection} />}
+            {connection.isActive !== false && <ConnectionErrorBadge connection={connection} />}
             <span className="text-xs text-text-muted">#{connection.priority}</span>
           </div>
           {hasAnyProxy && (
@@ -325,7 +311,10 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
     finally { setLoading(false); }
   }, [providerId]);
 
-  useEffect(() => { fetch_(); }, [fetch_]);
+  useEffect(() => {
+    const t = setTimeout(fetch_, 0);
+    return () => clearTimeout(t);
+  }, [fetch_]);
 
   const saveStrategy = async (strategy, stickyLimit) => {
     try {

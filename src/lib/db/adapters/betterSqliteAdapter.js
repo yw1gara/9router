@@ -32,11 +32,25 @@ export function createBetterSqliteAdapter(filePath) {
     try { db.close(); } catch {}
   }
 
-  // Ensure WAL is flushed and -wal/-shm files removed on shutdown
+  // Ensure WAL is flushed and -wal/-shm files removed on shutdown.
+  // CRITICAL: close the DB only AFTER the drain grace period, not before it.
+  // Closing immediately on SIGTERM/SIGINT pulled the connection out from under
+  // live requests still completing in that window, surfacing as cascading
+  // "The database connection is not open" errors (and "All models failed" combos).
+  // Order: drain in-flight work → checkpoint+close → exit. The timer is unref'd —
+  // if the event loop empties first the process exits naturally via beforeExit.
+  const SHUTDOWN_GRACE_MS = 1000;
   const onShutdown = () => gracefulClose();
+  const exitAfterGrace = () => {
+    const t = setTimeout(() => {
+      onShutdown();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS);
+    t.unref?.();
+  };
   process.once("beforeExit", onShutdown);
-  process.once("SIGINT", () => { onShutdown(); process.exit(0); });
-  process.once("SIGTERM", () => { onShutdown(); process.exit(0); });
+  process.once("SIGINT", exitAfterGrace);
+  process.once("SIGTERM", exitAfterGrace);
 
   return {
     driver: "better-sqlite3",

@@ -167,9 +167,13 @@ async function addDNSEntry(tool, sudoPassword) {
       const trimmed = current.replace(/[\r\n\s]+$/g, "");
       const toAppend = entriesToAdd.map(h => `127.0.0.1 ${h}`).join("\n");
       const next = `${trimmed}\n${toAppend}\n`;
-      // Use tee via sudo to overwrite atomically — escape single quotes in content
+      // Atomic update: write a temp file as root, then rename over /etc/hosts.
+      // `tee` truncates before writing — a crash mid-write would leave a
+      // truncated hosts file and break system-wide DNS. rename(2) on the same
+      // filesystem never exposes a partial file.
       const escaped = next.replace(/'/g, "'\\''");
-      await execWithPassword(`printf '%s' '${escaped}' | tee ${HOSTS_FILE} > /dev/null`, sudoPassword);
+      const tmpHosts = `${HOSTS_FILE}.9router-new`;
+      await execWithPassword(`printf '%s' '${escaped}' > ${tmpHosts} && mv ${tmpHosts} ${HOSTS_FILE}`, sudoPassword);
       await flushDNS(sudoPassword);
     }
     log(`🌐 DNS ${tool}: ✅ added ${entriesToAdd.join(", ")}`);
@@ -204,7 +208,8 @@ async function removeDNSEntry(tool, sudoPassword) {
       const filtered = current.split(/\r?\n/).filter(l => !entriesToRemove.some(h => l.includes(h))).join("\n");
       const next = filtered.replace(/[\r\n\s]+$/g, "") + "\n";
       const escaped = next.replace(/'/g, "'\\''");
-      await execWithPassword(`printf '%s' '${escaped}' | tee ${HOSTS_FILE} > /dev/null`, sudoPassword);
+      const tmpHosts = `${HOSTS_FILE}.9router-new`;
+      await execWithPassword(`printf '%s' '${escaped}' > ${tmpHosts} && mv ${tmpHosts} ${HOSTS_FILE}`, sudoPassword);
       await flushDNS(sudoPassword);
     }
     log(`🌐 DNS ${tool}: ✅ removed ${entriesToRemove.join(", ")}`);
