@@ -32,11 +32,12 @@ export const MEMORY_CONFIG = {
 };
 
 // Parse a positive integer env override, falling back to a default.
-function envMs(name, def) {
+function envMs(name, def, { allowZero = false } = {}) {
   const raw = process.env[name];
   if (raw == null || raw === "") return def;
   const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : def;
+  const valid = Number.isFinite(n) && (allowZero ? n >= 0 : n > 0);
+  return valid ? n : def;
 }
 
 function envUrl(name, def) {
@@ -60,7 +61,12 @@ export const FETCH_CONNECT_TIMEOUT_MS = envMs("FETCH_CONNECT_TIMEOUT_MS", 60 * 1
 
 // Combo fallback timeout: max time one combo target gets to return response
 // headers before the combo falls back to the next target. Env: COMBO_TARGET_TIMEOUT_MS.
-export const DEFAULT_COMBO_TARGET_TIMEOUT_MS = envMs("COMBO_TARGET_TIMEOUT_MS", 30 * 1000);
+// Lower default (12s) so a slow target cannot stall the whole combo for 30s before fallback.
+export const DEFAULT_COMBO_TARGET_TIMEOUT_MS = envMs("COMBO_TARGET_TIMEOUT_MS", 12 * 1000);
+
+// Optional pre-fallback sleep for transient 502/503/504 responses inside a combo.
+// 0 disables it — fall through to the next target immediately. Env: COMBO_TRANSIENT_WAIT_MS.
+export const COMBO_TRANSIENT_WAIT_MS = envMs("COMBO_TRANSIENT_WAIT_MS", 0, { allowZero: true });
 
 // Gemini native TTS fetch timeout: abort if Google does not return response headers in time.
 export const GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS = envMs("GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS", 45 * 1000);
@@ -81,9 +87,9 @@ export const RETRY_CONFIG = {
 // Backward compat: if value is a number, treated as attempts with RETRY_CONFIG.delayMs
 export const DEFAULT_RETRY_CONFIG = {
   429: { attempts: 0, delayMs: 0 },
-  502: { attempts: 3, delayMs: 3000 },
-  503: { attempts: 3, delayMs: 2000 },
-  504: { attempts: 2, delayMs: 3000 }
+  502: { attempts: 1, delayMs: 250 },
+  503: { attempts: 1, delayMs: 250 },
+  504: { attempts: 1, delayMs: 250 }
 };
 
 // Normalize a retry entry to { attempts, delayMs }

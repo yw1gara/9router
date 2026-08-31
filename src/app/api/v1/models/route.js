@@ -18,6 +18,7 @@ import { resolveZedModels } from "open-sse/shared/zedAuth.js";
 import { updateProviderCredentials } from "@/sse/services/tokenRefresh";
 import { resolveConnectionProxyConfig } from "@/lib/network/connectionProxy";
 import { capabilitiesFromServiceKind, getCapabilitiesForModel } from "open-sse/providers/capabilities.js";
+import { parseModel } from "open-sse/services/model.js";
 
 // Per-provider live model resolvers. Each receives a connection record and
 // returns { models: [{ id, name? }, ...] } | null on failure.
@@ -237,6 +238,57 @@ function comboMatchesKinds(combo, kindFilter) {
   return kindFilter.includes(kind);
 }
 
+// Resolve one combo's capabilities as the UNION of its members' capabilities:
+// a combo can answer an image request as long as at least one member model can.
+// Members may be `provider/model` strings or nested combo names; nested combos
+// are expanded recursively (cycle-safe). Unknown/aliased members fall back to
+// the pattern-matched default from capabilities.js — never text-only, so a
+// combo with vision members is not misreported as image-incapable.
+function getComboCapabilities(comboName, combos, seen = new Set()) {
+  if (seen.has(comboName)) return null;
+  seen.add(comboName);
+  const combo = combos.find((c) => c.name === comboName);
+  const members = Array.isArray(combo?.models) ? combo.models : [];
+  if (members.length === 0) return null;
+
+  let union = null;
+  for (const member of members) {
+    const memberStr = String(member).trim();
+    if (!memberStr) continue;
+
+    let caps = null;
+    if (memberStr.includes("/")) {
+      const parsed = parseModel(memberStr);
+      if (parsed?.model) {
+        caps = getCapabilitiesForModel(parsed.provider, parsed.model);
+      }
+    } else {
+      // Nested combo reference (no slash) — recurse.
+      caps = getComboCapabilities(memberStr, combos, seen);
+    }
+    if (!caps) continue;
+    if (!union) union = { ...caps };
+    else {
+      for (const key of Object.keys(caps)) {
+        if (caps[key] === true) union[key] = true;
+      }
+    }
+  }
+  return union;
+}
+
+// Map capability flags to the OpenAI-style input_modalities list used by
+// clients (e.g. deepseek-harness preflights image input via this field).
+function capabilitiesToInputModalities(caps) {
+  if (!caps) return null;
+  const modalities = ["text"];
+  if (caps.vision === true) modalities.push("image");
+  if (caps.pdf === true) modalities.push("pdf");
+  if (caps.audioInput === true) modalities.push("audio");
+  if (caps.videoInput === true) modalities.push("video");
+  return modalities;
+}
+
 /**
  * Build OpenAI-format models list filtered by service kinds.
  * @param {string[]} kindFilter - List of service kinds to include (e.g. ["llm"], ["webSearch","webFetch"]).
@@ -300,6 +352,10 @@ export async function buildModelsList(kindFilter, options = {}) {
       object: "model",
       owned_by: "combo",
     };
+    const comboCaps = getComboCapabilities(combo.name, combos);
+    const inputModalities = capabilitiesToInputModalities(comboCaps);
+    if (comboCaps) entry.capabilities = comboCaps;
+    if (inputModalities) entry.input_modalities = inputModalities;
     if (combo.kind === "webSearch" || combo.kind === "webFetch") {
       entry.kind = combo.kind;
     }
@@ -557,15 +613,63 @@ export async function OPTIONS() {
 /**
  * GET /v1/models - OpenAI compatible models list (LLM/chat models only by default).
  * For other capabilities use /v1/models/{kind} (image, tts, stt, embedding, image-to-text, web).
+ *
+ * Performance: the list takes 200-500ms to build (providers/combos/aliases) yet
+ * clients poll it frequently — serve from a 5s TTL cache with
+ * stale-while-revalidate, and gzip the ~54KB JSON to ~1/6th the size.
  */
+import zlib from "node:zlib";
+
+const MODELS_CACHE_TTL_MS = 5_000;
+const modelsCache = new Map(); // cacheKey -> { body, at, refreshing }
+
+function serveModelsBody(body, request) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Cache-Control": "public, max-age=5",
+  };
+  const accept = request?.headers?.get("accept-encoding") || "";
+  if (accept.includes("gzip")) {
+    try {
+      const gz = zlib.gzipSync(body, { level: 6 });
+      return new Response(gz, { headers: { ...headers, "Content-Encoding": "gzip", Vary: "Accept-Encoding" } });
+    } catch { /* fall through uncompressed */ }
+  }
+  return new Response(body, { headers });
+}
+
 export async function GET(request) {
   try {
     // Detect cross-instance recursive /models fetch (another 9router fetching our /models)
     const skipDynamicFetch = request?.headers?.get(INTERNAL_MODELS_FETCH_HEADER) === "1";
+    const cacheKey = skipDynamicFetch ? "skipDynamic" : "default";
+    const entry = modelsCache.get(cacheKey) || { body: null, at: 0, refreshing: false };
+    const now = Date.now();
+
+    if (entry.body && now - entry.at < MODELS_CACHE_TTL_MS) {
+      return serveModelsBody(entry.body, request);
+    }
+
+    // Stale-while-revalidate: serve the stale copy instantly, rebuild quietly.
+    if (entry.body && !entry.refreshing) {
+      entry.refreshing = true;
+      buildModelsList([LLM_KIND], { skipDynamicFetch })
+        .then((data) => {
+          entry.body = JSON.stringify({ object: "list", data });
+          entry.at = Date.now();
+        })
+        .catch(() => {})
+        .finally(() => { entry.refreshing = false; });
+      modelsCache.set(cacheKey, entry);
+      return serveModelsBody(entry.body, request);
+    }
+
     const data = await buildModelsList([LLM_KIND], { skipDynamicFetch });
-    return Response.json({ object: "list", data }, {
-      headers: { "Access-Control-Allow-Origin": "*" },
-    });
+    entry.body = JSON.stringify({ object: "list", data });
+    entry.at = now;
+    modelsCache.set(cacheKey, entry);
+    return serveModelsBody(entry.body, request);
   } catch (error) {
     console.log("Error fetching models:", error);
     return Response.json(

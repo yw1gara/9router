@@ -63,7 +63,6 @@ export default function OverviewCards({ stats }) {
   const topModel = getTopEntry(stats.byModel);
   const topKey = getTopEntry(stats.byApiKey);
   const topKeyTokens = topKey ? (Number(topKey.promptTokens) || 0) + (Number(topKey.completionTokens) || 0) : 0;
-  const activeKeys = Array.isArray(stats.activeApiKeys) ? stats.activeApiKeys : [];
   const cacheRate = input > 0 ? (cached / input) * 100 : 0;
   const avgTokens = requests > 0 ? Math.round(totalTokens / requests) : 0;
 
@@ -88,11 +87,6 @@ export default function OverviewCards({ stats }) {
             <p className="truncate text-sm font-medium text-text-main">
               {activeCount > 0 ? `${activeCount} request${activeCount === 1 ? "" : "s"} in flight` : "No requests in flight"}
             </p>
-            {activeKeys.length > 0 && (
-              <p className="truncate text-[11px] text-text-muted" title={activeKeys.map((k) => k.keyName || k.apiKey).join(", ")}>
-                Keys: {activeKeys.slice(0, 2).map((k) => `${k.keyName || k.apiKey} (${k.count})`).join(", ")}{activeKeys.length > 2 ? ` +${activeKeys.length - 2} more` : ""}
-              </p>
-            )}
           </div>
         </Card>
         <Card className="flex min-w-0 items-center gap-3 px-4 py-3">

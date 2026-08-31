@@ -1,0 +1,295 @@
+{
+  "schema_version": "mimosa-task-review/v2",
+  "run_id": "20260822T050949905Z-1730788-f45b707f7a85",
+  "run_status": "completed",
+  "errors": [],
+  "coverage": {
+    "schema_version": "mimosa-hook-coverage/v1",
+    "status": "complete",
+    "scope": "hook_observed_diff",
+    "baseline": {
+      "complete": true,
+      "captured_files": 1190,
+      "candidate_limit": 5000,
+      "truncated": false,
+      "enumeration_error_count": 0,
+      "snapshot_error_count": 0,
+      "compensated_target_count": 3
+    },
+    "change_tracking": {
+      "touched_observed": 3,
+      "touched_retained": 3,
+      "truncated": false,
+      "bash_mutation": false,
+      "bash_discovered": 0,
+      "bash_discovery_limit": 80,
+      "bash_discovery_truncated": false
+    },
+    "candidates": {
+      "eligible_files": 3,
+      "selected_files": 3,
+      "limit": 20,
+      "truncated": false
+    },
+    "scanning": {
+      "required_files": 3,
+      "scanned_files": 3,
+      "skipped_files": 0,
+      "failed_files": 0,
+      "project_checks_required": 0,
+      "project_checks_completed": 0
+    },
+    "notification": {
+      "eligible_findings": 2,
+      "detailed_findings": 0,
+      "detail_limit": 3,
+      "truncated": true
+    },
+    "reason_counts": {},
+    "reasons": [],
+    "reasons_truncated": false
+  },
+  "generated_at": "2026-08-22T05:09:49.905Z",
+  "session_id": "sess_d20ec933-2577-431c-bca1-41331a049b32",
+  "target": ".",
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "rules_version": "unavailable",
+  "diff_hash": "7e74228e197d3dbc2785db9f420571489684e1b1523d691988ccf16c761aa5c5",
+  "diff": {
+    "algorithm": "sha256",
+    "changed_file_count": 3,
+    "changed_files": [
+      {
+        "file": "src/lib/network/connectionProxy.js",
+        "ranges": [
+          {
+            "start": 26,
+            "end": 27
+          },
+          {
+            "start": 64,
+            "end": 65
+          },
+          {
+            "start": 71,
+            "end": 71
+          },
+          {
+            "start": 75,
+            "end": 75
+          }
+        ],
+        "before_hash": "77499cbd875b8919a0addf53958e01b30f2bfab12bc75e065e5f0dc1907f25b4",
+        "after_hash": "9bfffcec504a675b51a11c51fcc9bf9887a6fcd52fb98aa2a5faa7503edd2018"
+      },
+      {
+        "file": "tests/unit/github-monthly-usage-lock.test.js",
+        "ranges": [
+          {
+            "start": 77,
+            "end": 78
+          }
+        ],
+        "before_hash": "bac4e1f992bd0bd770f1ecc3960cb8eea17ff796a72292027b6c8e34594296c7",
+        "after_hash": "31e00ec12436eeb2298ae446c5df3af03f999ef0db356a201b17bf91ff63c7ec"
+      },
+      {
+        "file": "tests/unit/model-lock-accumulation.test.js",
+        "ranges": [
+          {
+            "start": 92,
+            "end": 92
+          },
+          {
+            "start": 94,
+            "end": 95
+          },
+          {
+            "start": 98,
+            "end": 98
+          }
+        ],
+        "before_hash": "57f7a11d9497f61dac79a1019447edc7ba7c0d3c5b7f8e61d06e7faa47861b3a",
+        "after_hash": "e743cfd343a7c5c1acd93ea3fe9d062430e6708513da0e60578783b886e9c580"
+      }
+    ]
+  },
+  "timing": {
+    "started_at": "2026-08-22T05:09:48.918Z",
+    "completed_at": "2026-08-22T05:09:49.905Z",
+    "duration_ms": 987,
+    "measurement": "hook_wall_clock"
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "model_calls": 0,
+    "measurement": "known-zero"
+  },
+  "telemetry": {
+    "schemaVersion": "mimosa-gate-telemetry/v1",
+    "profile": "gate",
+    "operation": "Stop",
+    "outcome": "complete",
+    "latencyMs": 987,
+    "peakMemoryBytes": 172208128,
+    "memoryMeasurement": "max-observed-process-rss",
+    "scannedFiles": 3,
+    "cache": {
+      "hits": 0,
+      "misses": 0,
+      "measurement": "not-applicable"
+    },
+    "denyCount": 0,
+    "tokens": {
+      "input": 0,
+      "output": 0,
+      "total": 0,
+      "modelCalls": 0,
+      "measurement": "known-zero"
+    }
+  },
+  "finding_count": 2,
+  "rewake_finding_count": 0,
+  "evidence_boundary": {
+    "scan": "candidate",
+    "static_fix_verification": "observed_static_only",
+    "runtime_verification": "not_performed"
+  },
+  "finding_events": [
+    {
+      "finding_id": "mimosa-bb656abbf3b4bd76e3df5587",
+      "file": "src/lib/network/connectionProxy.js",
+      "line": 79,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "弱随机数",
+      "status": "candidate",
+      "decision": "advisory",
+      "at": "2026-08-22T04:49:43.331Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-8e06c75ace27716ec4e1f2ba",
+      "file": "src/lib/network/connectionProxy.js",
+      "line": 83,
+      "rule_id": "security",
+      "severity": "high",
+      "category": "弱随机数",
+      "status": "candidate",
+      "decision": "advisory",
+      "at": "2026-08-22T04:49:43.331Z",
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-bb656abbf3b4bd76e3df5587",
+      "file": "src/lib/network/connectionProxy.js",
+      "line": 71,
+      "severity": "high",
+      "category": "弱随机数",
+      "status": "candidate",
+      "decision": "observe",
+      "at": "2026-08-22T05:09:49.905Z",
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63",
+        "runtime_oracle": false
+      }
+    },
+    {
+      "finding_id": "mimosa-8e06c75ace27716ec4e1f2ba",
+      "file": "src/lib/network/connectionProxy.js",
+      "line": 75,
+      "severity": "high",
+      "category": "弱随机数",
+      "status": "candidate",
+      "decision": "observe",
+      "at": "2026-08-22T05:09:49.905Z",
+      "evidence": {
+        "kind": "static_scan",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "source": "semgrep",
+        "evidence_hash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff",
+        "runtime_oracle": false
+      }
+    }
+  ],
+  "findings": [
+    {
+      "finding_id": "mimosa-bb656abbf3b4bd76e3df5587",
+      "file": "src/lib/network/connectionProxy.js",
+      "line": 71,
+      "end_line": 71,
+      "severity": "high",
+      "category": "弱随机数",
+      "kind": "semgrep",
+      "advisory": true,
+      "status": "candidate",
+      "evidence_boundary": "candidate",
+      "evidence": [
+        {
+          "kind": "static_scan",
+          "boundary": "candidate",
+          "producer": "deterministic",
+          "source": "semgrep",
+          "file": "src/lib/network/connectionProxy.js",
+          "line": 71,
+          "evidence_hash": "62a65cdc2457089156b96ed55dd126172130d64473c6dffd664ebc523d694c63",
+          "runtime_oracle": false
+        }
+      ],
+      "already_reported_to_agent": false,
+      "selected_for_rewake": false
+    },
+    {
+      "finding_id": "mimosa-8e06c75ace27716ec4e1f2ba",
+      "file": "src/lib/network/connectionProxy.js",
+      "line": 75,
+      "end_line": 75,
+      "severity": "high",
+      "category": "弱随机数",
+      "kind": "semgrep",
+      "advisory": true,
+      "status": "candidate",
+      "evidence_boundary": "candidate",
+      "evidence": [
+        {
+          "kind": "static_scan",
+          "boundary": "candidate",
+          "producer": "deterministic",
+          "source": "semgrep",
+          "file": "src/lib/network/connectionProxy.js",
+          "line": 75,
+          "evidence_hash": "a7c92fe7b4e483123f37d6bfd1d2fc0829ec0a6a0578d37e1a440341b7a65fff",
+          "runtime_oracle": false
+        }
+      ],
+      "already_reported_to_agent": false,
+      "selected_for_rewake": false
+    }
+  ],
+  "artifacts": {
+    "immutable_report": ".mimosa/reports/task-review-sess_d20ec933-2577-431c-bca1-41331a049b32-20260822T050949905Z-1730788-f45b707f7a85.json",
+    "latest_report": ".mimosa/reports/task-review-sess_d20ec933-2577-431c-bca1-41331a049b32.json",
+    "history_summary": ".mimosa/history/run-20260822T050949905Z-1730788-f45b707f7a85.json"
+  }
+}

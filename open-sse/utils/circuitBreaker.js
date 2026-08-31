@@ -11,6 +11,10 @@
  * in-memory Map instead of DB persistence.
  */
 
+// Master kill switch: when true, no breaker ever blocks a request.
+// Disable again by flipping this to false.
+export const CIRCUIT_BREAKER_DISABLED = true;
+
 export const STATE = {
   CLOSED: "CLOSED",
   DEGRADED: "DEGRADED",
@@ -97,6 +101,8 @@ class CircuitBreaker {
   }
 
   canExecute() {
+    // Circuit breaker disabled by operator — every request passes through.
+    if (CIRCUIT_BREAKER_DISABLED) return true;
     const now = Date.now();
     if (this.state === STATE.CLOSED) return true;
     if (this.state === STATE.DEGRADED) return true;

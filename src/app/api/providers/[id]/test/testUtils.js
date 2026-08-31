@@ -515,6 +515,21 @@ async function testApiKeyConnection(connection, effectiveProxy = null) {
 
   try {
     switch (connection.provider) {
+      case "freebuff": {
+        // Zero-cost probe: GET the session endpoint without an instance
+        // header — claims no session slot and burns no daily quota.
+        const res = await fetchWithConnectionProxy("https://www.codebuff.com/api/v1/freebuff/session", {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${connection.apiKey}`,
+            "User-Agent": "ai-sdk/openai-compatible/1.0.0/codebuff",
+          },
+        }, effectiveProxy);
+        if (res.status === 401 || res.status === 403) {
+          return { valid: false, error: "Invalid or banned token" };
+        }
+        return { valid: true, error: null };
+      }
       case "cloudflare-ai": {
         const psd = connection.providerSpecificData || {};
         const accountId = psd.accountId;
@@ -825,8 +840,17 @@ case "llm7": {
         }, effectiveProxy);
         return { valid: res.ok, error: res.ok ? null : "Invalid API key", refreshed: false };
       }
-      default:
-        return { valid: false, error: "Provider test not supported" };
+      default: {
+        // Generic fallback: providers without a bespoke probe (e.g. orcarouter)
+        // declare a validateUrl in the registry — a GET with the Bearer key
+        // against it is enough to distinguish valid vs rejected credentials.
+        const validateUrl = PROVIDERS[connection.provider]?.validateUrl;
+        if (!validateUrl) return { valid: false, error: "Provider test not supported" };
+        const res = await fetchWithConnectionProxy(validateUrl, {
+          headers: { Authorization: `Bearer ${connection.apiKey}` },
+        }, effectiveProxy);
+        return { valid: res.ok, error: res.ok ? null : "Invalid API key" };
+      }
     }
   } catch (err) {
     return { valid: false, error: err.message };

@@ -517,11 +517,18 @@ export default function OAuthModal({ isOpen, provider, providerInfo, onSuccess, 
 
     // Method 1: postMessage from popup
     const handleMessage = (event) => {
-      // Allow messages from same origin or localhost (any port)
-      const isLocalhost = event.origin.includes("localhost") || event.origin.includes("127.0.0.1");
+      // Allow same origin or localhost/loopback by exact hostname — substring
+      // matching would also accept e.g. https://localhost.evil.com.
+      let originHost = null;
+      try {
+        originHost = new URL(event.origin).hostname;
+      } catch {
+        return;
+      }
+      const isLocalhost = originHost === "localhost" || originHost === "127.0.0.1" || originHost === "::1";
       const isSameOrigin = event.origin === window.location.origin;
       if (!isLocalhost && !isSameOrigin) return;
-      
+
       if (event.data?.type === "oauth_callback") {
         handleCallback(event.data.data);
       }

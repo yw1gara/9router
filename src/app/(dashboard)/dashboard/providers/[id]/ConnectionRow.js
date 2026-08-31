@@ -7,7 +7,7 @@ import { Badge, Toggle, Tooltip } from "@/shared/components";
 import ModelLockChips from "../components/ModelLockChips";
 import ConnectionErrorBadge from "../components/ConnectionErrorBadge";
 
-export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
+export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onAssignSmartPools, onTest, testing = false, onEdit, onDelete, oneByOneStatus = null, autoPing = null, providerProxyApply = null, livePoolCount = 0 }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
   const proxyDropdownRef = useRef(null);
@@ -15,15 +15,22 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   const proxyPoolMap = new Map((proxyPools || []).map((pool) => [pool.id, pool]));
   const boundProxyPoolId = connection.providerSpecificData?.proxyPoolId || null;
   const boundProxyPool = boundProxyPoolId ? proxyPoolMap.get(boundProxyPoolId) : null;
+  const multiPoolIds = Array.isArray(connection.providerSpecificData?.proxyPoolIds)
+    ? connection.providerSpecificData.proxyPoolIds
+    : [];
+  const rotationStrategy = connection.providerSpecificData?.proxyRotationStrategy || "";
+  const proxyRequired = connection.providerSpecificData?.proxyRequired === true;
   const hasLegacyProxy = connection.providerSpecificData?.connectionProxyEnabled === true && !!connection.providerSpecificData?.connectionProxyUrl;
-  const hasAnyProxy = !!boundProxyPoolId || hasLegacyProxy;
-  const proxyDisplayText = boundProxyPool
-    ? `Pool: ${boundProxyPool.name}`
-    : boundProxyPoolId
-      ? `Pool: ${boundProxyPoolId} (inactive/missing)`
-      : hasLegacyProxy
-        ? `Legacy: ${connection.providerSpecificData?.connectionProxyUrl}`
-        : "";
+  const hasAnyProxy = !!boundProxyPoolId || multiPoolIds.length > 0 || hasLegacyProxy;
+  const proxyDisplayText = multiPoolIds.length > 0
+    ? `Pools: ${multiPoolIds.length}${rotationStrategy ? ` · ${rotationStrategy}` : ""}`
+    : boundProxyPool
+      ? `Pool: ${boundProxyPool.name}`
+      : boundProxyPoolId
+        ? `Pool: ${boundProxyPoolId} (inactive/missing)`
+        : hasLegacyProxy
+          ? `Legacy: ${connection.providerSpecificData?.connectionProxyUrl}`
+          : "";
   const autoPingTooltip = autoPing?.provider === "codex"
     ? "Auto-starts the next 5h Codex window after reset by sending a tiny gpt-5.5 request. Consumes a small amount of quota."
     : "When your 5h quota runs out, auto-sends a request the moment it resets so a new window starts right away.";
@@ -42,7 +49,9 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   const noProxyText = boundProxyPool?.noProxy || connection.providerSpecificData?.connectionNoProxy || "";
 
   let proxyBadgeVariant = "default";
-  if (boundProxyPool?.isActive === true) {
+  if (multiPoolIds.length > 0) {
+    proxyBadgeVariant = multiPoolIds.some((id) => proxyPoolMap.get(id)?.isActive === true) ? "success" : "error";
+  } else if (boundProxyPool?.isActive === true) {
     proxyBadgeVariant = "success";
   } else if (boundProxyPoolId || hasLegacyProxy) {
     proxyBadgeVariant = "error";
@@ -64,6 +73,16 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     setUpdatingProxy(true);
     try {
       await onUpdateProxy(poolId === "__none__" ? null : poolId);
+    } finally {
+      setUpdatingProxy(false);
+      setShowProxyDropdown(false);
+    }
+  };
+
+  const handleAssignSmart = async () => {
+    setUpdatingProxy(true);
+    try {
+      await onAssignSmartPools();
     } finally {
       setUpdatingProxy(false);
       setShowProxyDropdown(false);
@@ -119,12 +138,21 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     };
   }, [modelLockUntil]);
 
-  // Determine effective status (override unavailable if cooldown expired)
-  const effectiveStatus = (connection.testStatus === "unavailable" && !isCooldown)
-    ? "active"  // Cooldown expired u2192 treat as active
-    : connection.testStatus;
+  const isAutoUnavailable =
+    connection.isActive === false &&
+    Boolean(connection.providerSpecificData?.autoRecoveryDisabled);
 
-  const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
+  // A model-scoped cooldown must never make a still-active account unavailable.
+  // Only the auto-disable marker represents a true unavailable account.
+  const effectiveStatus = isAutoUnavailable
+    ? "unavailable"
+    : connection.isActive !== false
+      ? "active"
+      : connection.testStatus;
+  const getStatusVariant = () =>
+    isAutoUnavailable
+      ? "error"
+      : getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
   const getOneByOneVariant = () => {
     if (!oneByOneStatus) return "default";
@@ -173,7 +201,11 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
           )}
           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 sm:gap-2">
             <Badge variant={getStatusVariant()} size="sm" dot>
-              {connection.isActive === false ? "disabled" : (effectiveStatus || "Unknown")}
+              {isAutoUnavailable
+                ? "unavailable"
+                : connection.isActive === false
+                  ? "disabled"
+                  : (effectiveStatus || "Unknown")}
             </Badge>
             <Badge variant="default" size="sm">
               {authLabel}
@@ -183,8 +215,10 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                 Proxy
               </Badge>
             )}
-            {connection.isActive !== false && <ModelLockChips connection={connection} />}
-            {connection.isActive !== false && <ConnectionErrorBadge connection={connection} />}
+            <ModelLockChips connection={connection} />
+            {!isAutoUnavailable && connection.isActive !== false && Number(connection.errorCode) !== 429 && (
+              <ConnectionErrorBadge connection={connection} />
+            )}
             <span className="text-xs text-text-muted">#{connection.priority}</span>
             {connection.globalPriority && (
               <span className="text-xs text-text-muted">Auto: {connection.globalPriority}</span>
@@ -195,7 +229,19 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
           </div>
-          {hasAnyProxy && (
+          {providerProxyApply && providerProxyApply.strategy && providerProxyApply.strategy !== "none" ? (
+            <div className="mt-1 flex items-center gap-2 flex-wrap">
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-orange-100 px-2 py-0.5 text-[11px] font-medium text-orange-600 dark:bg-orange-500/15 dark:text-orange-400"
+                title="Provider-level proxy default is ACTIVE: every account of this provider (including newly added ones) routes through the live pool inventory. New pools join automatically."
+              >
+                <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+                {providerProxyApply.strategy === "fixed" ? "Proxy default: fixed" : `Proxy default: ${providerProxyApply.strategy}`}
+                {" · "}
+                <span className="tabular-nums">{livePoolCount} pools (live)</span>
+              </span>
+            </div>
+          ) : hasAnyProxy ? (
             <div className="mt-1 flex items-center gap-2 flex-wrap">
               <span className="max-w-full truncate text-[11px] text-text-muted sm:max-w-[420px]" title={proxyDisplayText}>
                 {proxyDisplayText}
@@ -211,7 +257,7 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                 </span>
               )}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
       <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
@@ -233,15 +279,23 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
                 <div className="absolute right-0 top-full z-50 mt-1 max-w-[78vw] min-w-[160px] rounded-lg border border-border bg-bg py-1 shadow-lg">
                   <button
                     onClick={() => handleSelectProxy("__none__")}
-                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${!boundProxyPoolId ? "text-primary font-medium" : "text-text-main"}`}
+                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${!boundProxyPoolId && multiPoolIds.length === 0 ? "text-primary font-medium" : "text-text-main"}`}
                   >
                     None
+                  </button>
+                  <button
+                    onClick={handleAssignSmart}
+                    disabled={updatingProxy || !onAssignSmartPools}
+                    title="Each account keeps its own proxy from all active pools; auto-rotates to a healthy pool when the assigned one fails"
+                    className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-50 ${rotationStrategy === "smart" ? "text-primary font-medium" : "text-text-main"}`}
+                  >
+                    Smart · Auto (all pools)
                   </button>
                   {(proxyPools || []).map((pool) => (
                     <button
                       key={pool.id}
                       onClick={() => handleSelectProxy(pool.id)}
-                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"}`}
+                      className={`w-full text-left px-3 py-1.5 text-sm hover:bg-black/5 dark:hover:bg-white/5 ${multiPoolIds.length === 0 && boundProxyPoolId === pool.id ? "text-primary font-medium" : "text-text-main"}`}
                     >
                       {pool.name}
                     </button>
@@ -250,6 +304,14 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               )}
             </div>
           )}
+          <button
+            onClick={onTest}
+            disabled={testing || !onTest}
+            className="flex flex-col items-center rounded px-2 py-1 text-text-muted hover:bg-black/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/5"
+          >
+            <span className={`material-symbols-outlined text-[18px]${testing ? " animate-spin" : ""}`}>refresh</span>
+            <span className="text-[10px] leading-tight">Test</span>
+          </button>
           {autoPing && (
             <Tooltip text={autoPingTooltip}>
               <button
@@ -308,6 +370,9 @@ ConnectionRow.propTypes = {
   onMoveDown: PropTypes.func.isRequired,
   onToggleActive: PropTypes.func.isRequired,
   onUpdateProxy: PropTypes.func,
+  onAssignSmartPools: PropTypes.func,
+  onTest: PropTypes.func,
+  testing: PropTypes.bool,
   onEdit: PropTypes.func.isRequired,
   onDelete: PropTypes.func.isRequired,
   oneByOneStatus: PropTypes.shape({

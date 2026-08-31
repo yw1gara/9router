@@ -218,7 +218,7 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     const think = showThinking ? log.fmtThink?.(extractThinking(translatedBody)) : null;
     const acc = credentials?.connectionName || credentials?.connectionId?.slice(0, 8) || "-";
     const parts = [
-      `POST ${clientModel} → ${provider}/${model}`,
+      `POST ${clientModel} → ${credentials?.providerDisplayName || provider}/${model}`,
       fmtStr,
       stream ? "STREAM" : "JSON",
       `${msgN} MSG`,
@@ -310,7 +310,97 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     connectionProxyUrl: credentials?.providerSpecificData?.connectionProxyUrl || "",
     connectionNoProxy: credentials?.providerSpecificData?.connectionNoProxy || "",
     vercelRelayUrl: credentials?.providerSpecificData?.vercelRelayUrl || "",
+    // strictProxy/proxyRequired were resolved per-connection in
+    // resolveConnectionProxyConfig but dropped here previously — forward them
+    // so proxyAwareFetch can fail closed instead of silently going direct.
+    strictProxy: credentials?.providerSpecificData?.strictProxy === true,
+    proxyRequired: credentials?.providerSpecificData?.proxyRequired === true,
+    smartProxy: credentials?.providerSpecificData?.smartProxy === true || credentials?.providerSpecificData?.proxyRotationStrategy === "smart",
+    // Observability context. proxyAwareFetch receives this for every executor
+    // path, so proxy transport failures identify their real source.
+    provider,
+    model,
+    connectionId: credentials?.connectionId || connectionId || null,
+    connectionName: credentials?.connectionName || null,
+    proxyPoolId: credentials?.providerSpecificData?.connectionProxyPoolId || null,
+    proxyPoolScope: credentials?.providerSpecificData?.proxyPoolScope || null,
   };
+
+  // ── Pool-scoped failure handling ───────────────────────────────────
+  // A smart pool failure is scoped to provider::model and cools that pool for
+  // 10 minutes. This request then tries every other assigned, fit pool once.
+  // Smart resolution fails closed once no candidate remains.
+  let activePoolId = credentials?.providerSpecificData?.connectionProxyPoolId || null;
+  const poolScope = credentials?.providerSpecificData?.proxyPoolScope || null;
+  const poolCandidates = Array.isArray(credentials?.providerSpecificData?.proxyPoolIds)
+    ? credentials.providerSpecificData.proxyPoolIds
+    : [];
+  // Do not fan one request across every pool. Three candidates gives useful
+  // rotation while bounding latency and upstream load.
+  const POOL_RETRY_MAX = Math.min(Math.max(poolCandidates.length, 1), 3);
+  const PROXY_RETRY_TIMEOUT_MS = 12_000;
+  const usingProxy = !!(proxyOptions.connectionProxyEnabled && proxyOptions.connectionProxyUrl) || !!proxyOptions.vercelRelayUrl;
+  const excludePoolIds = [];
+
+  function logProxyFailure(label, error) {
+    const errText = String(error?.message || error || "unknown");
+    log?.warn?.(
+      "PROXY",
+      `${provider.toUpperCase()} | ${label} | conn=${proxyOptions.connectionName || proxyOptions.connectionId || "unknown"} | pool=${proxyOptions.proxyPoolId || activePoolId || "none"} | ${errText}`
+    );
+  }
+
+  function isClientAbort(error) {
+    return error?.name === "AbortError" || streamController.signal?.aborted === true;
+  }
+
+  function isProxyTransportFailure(error) {
+    if (isClientAbort(error)) return false;
+    const t = String(error?.message || error?.cause?.message || error || "");
+    // Proxy errors are eligible only when transport itself failed. Upstream
+    // HTTP/model/auth/quota errors must never poison a proxy pool.
+    return /\[ProxyFetch\].*(Smart proxy failed|Relay proxy failed)|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ECONNABORTED|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|tunneling socket|CONNECT tunnel|proxy authentication failed/i.test(t);
+  }
+
+  async function tryNextPool(reason) {
+    if (!usingProxy || !activePoolId || !poolScope || !poolCandidates.includes(activePoolId)) return null;
+    if (excludePoolIds.length >= POOL_RETRY_MAX) return null;
+    try {
+      const { markPoolUnfit } = await import("../services/proxyPoolFitness.js");
+      await markPoolUnfit(activePoolId, poolScope, null, reason);
+    } catch { /* advisory */ }
+    excludePoolIds.push(activePoolId);
+    try {
+      const { resolveConnectionProxyConfig } = await import("../../src/lib/network/connectionProxy.js");
+      const next = await resolveConnectionProxyConfig(
+        credentials?.providerSpecificData || {},
+        provider,
+        excludePoolIds,
+        { scope: poolScope, connectionId: credentials?.connectionId || connectionId || null }
+      );
+      if (!next || (!next.connectionProxyUrl && !next.vercelRelayUrl)) return null;
+      proxyOptions.connectionProxyEnabled = next.connectionProxyEnabled === true;
+      proxyOptions.connectionProxyUrl = next.connectionProxyUrl || "";
+      proxyOptions.connectionNoProxy = next.connectionNoProxy || "";
+      proxyOptions.vercelRelayUrl = next.vercelRelayUrl || "";
+      proxyOptions.strictProxy = next.strictProxy === true;
+      proxyOptions.proxyRequired = next.proxyRequired === true;
+      proxyOptions.smartProxy = next.smartProxy === true;
+      proxyOptions.proxyPoolId = next.proxyPoolId || null;
+      proxyOptions.proxyPoolScope = next.proxyPoolScope || poolScope || null;
+      if (credentials?.providerSpecificData) {
+        credentials.providerSpecificData.connectionProxyPoolId = next.proxyPoolId || null;
+        credentials.providerSpecificData.connectionProxyUrl = proxyOptions.connectionProxyUrl;
+        credentials.providerSpecificData.connectionProxyEnabled = proxyOptions.connectionProxyEnabled;
+        credentials.providerSpecificData.vercelRelayUrl = proxyOptions.vercelRelayUrl;
+      }
+      log?.warn?.("PROXY", `${provider.toUpperCase()} | pool ${activePoolId.slice(0, 8)} failed (${reason}) — retrying on pool ${String(next.proxyPoolId || "").slice(0, 8)}`);
+      activePoolId = next.proxyPoolId || activePoolId;
+      return next;
+    } catch {
+      return null;
+    }
+  }
 
   if (proxyOptions.vercelRelayUrl) {
     const connectionName = credentials?.connectionName || credentials?.connectionId || "unknown";
@@ -352,6 +442,41 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     providerResponseFormat = result.responseFormat || targetFormat;
     reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
   } catch (error) {
+    // Pool-scoped network failure: rotate to another assigned pool once
+    // before giving up. Only fires when the error clearly implicates the
+    // proxy transport, so provider-side errors never poison pool fitness.
+    if (usingProxy && isProxyTransportFailure(error)) {
+      logProxyFailure("initial proxy request failed", error);
+      // Pool-scoped failure loop: keep marking the failing pool unfit and
+      // rotating to the next fit pool until one responds or the rotation
+      // budget (POOL_RETRY_MAX) is exhausted. Previously this retried exactly
+      // once and swallowed a second pool failure, failing the whole request
+      // even when more healthy pools were available.
+      let rotateError = error;
+      for (let rotation = 0; rotation < POOL_RETRY_MAX; rotation++) {
+        if (streamController.signal?.aborted) break;
+        const next = await tryNextPool("network:" + (rotateError.name || "Error"));
+        if (!next) break;
+        const retrySignal = AbortSignal.timeout(PROXY_RETRY_TIMEOUT_MS);
+        try {
+          const retry = await executor.execute({ model, body: translatedBody, stream, credentials, signal: retrySignal, log, proxyOptions });
+          providerResponse = retry.response;
+          providerUrl = retry.url;
+          providerHeaders = retry.headers;
+          finalBody = retry.transformedBody;
+          providerResponseFormat = retry.responseFormat || targetFormat;
+          reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+          // Success or upstream error — handled by shared flow below.
+          break;
+        } catch (rotatedErr) {
+          if (!isProxyTransportFailure(rotatedErr)) break;
+          logProxyFailure("rotated proxy request failed; rotating again", rotatedErr);
+          rotateError = rotatedErr;
+        }
+      }
+    }
+
+    if (!providerResponse) {
     trackPendingRequest(model, provider, connectionId, false, true, apiKey);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${error.name === "AbortError" ? 499 : HTTP_STATUS.BAD_GATEWAY}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
@@ -369,11 +494,15 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       streamController.handleError(error);
       return createErrorResult(499, "Request aborted");
     }
-    const errMsg = formatProviderError(error, provider, model, HTTP_STATUS.BAD_GATEWAY);
+    // Honor an upstream status carried on the error (e.g. 429 from exhausted
+    // fallback URLs) instead of rewrapping everything as 502.
+    const errorStatus = Number.isInteger(error.status) ? error.status : HTTP_STATUS.BAD_GATEWAY;
+    const errMsg = formatProviderError(error, provider, model, errorStatus);
     if (log?.errorLine) {
-      log.errorLine(reqTag, "✗", `ERROR 502 · ${provider}/${model} · ${Date.now() - requestStartTime}ms\n    ${errMsg}${error.stack ? `\n    ${error.stack}` : ""}`);
+      log.errorLine(reqTag, "✗", `ERROR ${errorStatus} · ${provider}/${model} · ${Date.now() - requestStartTime}ms\n    ${errMsg}${error.stack ? `\n    ${error.stack}` : ""}`);
     }
-    return createErrorResult(HTTP_STATUS.BAD_GATEWAY, errMsg);
+    return createErrorResult(errorStatus, errMsg);
+    }
   }
 
   // Handle 401/403 - try token refresh (skip for noAuth providers)
@@ -406,6 +535,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
             providerResponse = retryResult.response;
             providerUrl = retryResult.url;
             providerResponseFormat = retryResult.responseFormat || targetFormat;
+          } else if (retryResult.response.body) {
+            // Non-ok retry: same pooled-socket starvation — release it too.
+            retryResult.response.body.cancel().catch(() => {});
           }
         } catch { log?.warn?.("TOKEN", `${provider.toUpperCase()} | retry after refresh failed`); }
       } else {
@@ -414,6 +546,76 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
     } catch (e) {
       log?.warn?.("TOKEN", `${provider.toUpperCase()} | refresh threw: ${e.message}`);
     }
+  }
+
+  // Pool-scoped egress rotation: executor parseError() may classify an
+  // upstream response as egress-IP scoped. Every failed smart pool receives
+  // a 10-minute provider::model cooldown, then every remaining pool is tried.
+  if (
+    usingProxy && executor.noAuth &&
+    activePoolId && poolScope && poolCandidates.includes(activePoolId) &&
+    !providerResponse.ok
+  ) {
+    let rotationReason = null;
+    if (typeof executor.parseError === "function" && providerResponse.body) {
+      // Snapshot the body once; parseUpstreamError below reuses it.
+      try {
+        providerResponse._prefetchedErrorText = await providerResponse.text();
+      } catch { /* body unreadable — parseUpstreamError falls back to status */ }
+      try {
+        const parsed = await parseUpstreamError(providerResponse, executor);
+        if (parsed?.poolScoped) rotationReason = parsed.poolScoped.reason || "pool-scoped";
+      } catch { /* parse failure — no rotation */ }
+    } else if (providerResponse.status === HTTP_STATUS.RATE_LIMITED) {
+      rotationReason = "ratelimit:429";
+    }
+    if (rotationReason) {
+      let rotatedResponse = providerResponse;
+      let failedPoolId = activePoolId;
+      for (let rotation = 0; rotation < POOL_RETRY_MAX; rotation++) {
+        const next = await tryNextPool(rotationReason);
+        if (!next) break;
+        try {
+          if (rotatedResponse.body) rotatedResponse.body.cancel().catch(() => {});
+          const retry = await executor.execute({ model, body: translatedBody, stream, credentials, signal: streamController.signal, log, proxyOptions });
+          providerResponse = retry.response;
+          providerUrl = retry.url;
+          providerHeaders = retry.headers;
+          finalBody = retry.transformedBody;
+          providerResponseFormat = retry.responseFormat || targetFormat;
+          reqLogger.logTargetRequest(providerUrl, providerHeaders, finalBody);
+          if (providerResponse.ok) {
+            log?.warn?.("PROXY", `${provider.toUpperCase()} | conn=${proxyOptions.connectionName || proxyOptions.connectionId || "unknown"} | pool=${String(failedPoolId || "none").slice(0, 8)} hit ${rotationReason}; rotated to pool=${String(next.proxyPoolId || "none").slice(0, 8)} | 10m cooldown | succeeded`);
+            break;
+          }
+          rotatedResponse = providerResponse;
+          if (typeof executor.parseError === "function" && providerResponse.body) {
+            try {
+              providerResponse._prefetchedErrorText = await providerResponse.text();
+              const parsed = await parseUpstreamError(providerResponse, executor);
+              if (!parsed?.poolScoped) break;
+              rotationReason = parsed.poolScoped.reason || "pool-scoped";
+            } catch { break; }
+          } else if (providerResponse.status !== HTTP_STATUS.RATE_LIMITED) {
+            break;
+          }
+          failedPoolId = activePoolId;
+        } catch (retryError) {
+          if (retryError.name === "AbortError" || !isPoolScopedErrorMessage(retryError?.message || retryError?.cause?.message)) break;
+          logProxyFailure("rotated proxy request failed; rotating again", retryError);
+          failedPoolId = activePoolId;
+        }
+      }
+    }
+  }
+
+  // Success through this pool ⇒ reset its accumulated failure count for the
+  // scope. Pool-failure accumulation only ever resets on SUCCESS — never on
+  // cooldown expiry (a pool that keeps failing after each retry escalates).
+  if (providerResponse.ok && activePoolId && poolScope) {
+    try {
+      import("../services/proxyPoolFitness.js").then((m) => m.clearPoolUnfit(activePoolId, poolScope)).catch(() => {});
+    } catch { /* advisory */ }
   }
 
   // Provider returned error

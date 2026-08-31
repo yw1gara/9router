@@ -180,7 +180,12 @@ export class BaseExecutor {
       }
     }
 
-    throw lastError || new Error(`All ${fallbackCount} URLs failed with status ${lastStatus}`);
+    if (lastError) throw lastError;
+    // Preserve the upstream status (e.g. 429) so callers don't rewrap a plain
+    // rate-limit as 502 — chatCore would then feed the provider 5xx breaker.
+    const statusError = new Error(`All ${fallbackCount} URLs failed with status ${lastStatus}`);
+    statusError.status = lastStatus;
+    throw statusError;
   }
 }
 

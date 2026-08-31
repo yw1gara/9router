@@ -33,14 +33,19 @@ export function createBetterSqliteAdapter(filePath) {
   }
 
   // Ensure WAL is flushed and -wal/-shm files removed on shutdown.
-  // SIGINT/SIGTERM exit after a short grace period so async shutdown handlers
-  // registered elsewhere (e.g. the request-details write buffer flush) can
-  // drain before the process dies. The timer is unref'd — if the event loop
-  // empties first the process exits naturally.
+  // CRITICAL: close the DB only AFTER the drain grace period, not before it.
+  // Closing immediately on SIGTERM/SIGINT pulled the connection out from under
+  // live requests still completing in that window, surfacing as cascading
+  // "The database connection is not open" errors (and "All models failed" combos).
+  // Order: drain in-flight work → checkpoint+close → exit. The timer is unref'd —
+  // if the event loop empties first the process exits naturally via beforeExit.
+  const SHUTDOWN_GRACE_MS = 1000;
   const onShutdown = () => gracefulClose();
   const exitAfterGrace = () => {
-    onShutdown();
-    const t = setTimeout(() => process.exit(0), 500);
+    const t = setTimeout(() => {
+      onShutdown();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS);
     t.unref?.();
   };
   process.once("beforeExit", onShutdown);

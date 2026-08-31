@@ -1,6 +1,6 @@
 import { FORMATS } from "../../translator/formats.js";
 import { needsTranslation } from "../../translator/index.js";
-import { fromOpenAIFinish } from "../../translator/concerns/finishReason.js";
+import { fromOpenAIFinish, normalizeToolFinishReason } from "../../translator/concerns/finishReason.js";
 import { ollamaBodyToOpenAI } from "../../translator/response/ollama-to-openai.js";
 import { addBufferToUsage, filterUsageForFormat } from "../../utils/usageTracking.js";
 import { createErrorResult } from "../../utils/error.js";
@@ -9,6 +9,8 @@ import { parseSSEToOpenAIResponse } from "./sseToJsonHandler.js";
 import { buildRequestDetail, extractRequestConfig, extractUsageFromResponse, saveUsageStats, formatDoneLine } from "./requestDetail.js";
 import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
+import { detectDegenerateLoop, DEGENERATE_TAIL_WINDOW } from "../../utils/degenerate.js";
+import { noteTargetFailure } from "../../services/combo.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 function parseToolArguments(value) {
@@ -18,6 +20,24 @@ function parseToolArguments(value) {
     return JSON.parse(value);
   } catch {
     return {};
+  }
+}
+
+/**
+ * Pull the assistant's text out of a provider response body (OpenAI choices,
+ * Claude content blocks) for the degenerate-output guard. Returns "" when the
+ * body carries no text content (e.g. tool-call-only responses).
+ */
+function extractAssistantTextForGuard(body) {
+  try {
+    const c = body?.choices?.[0]?.message?.content;
+    if (typeof c === "string") return c;
+    if (Array.isArray(body?.content)) {
+      return body.content.filter((b) => b?.type === "text").map((b) => b?.text || "").join("");
+    }
+    return "";
+  } catch {
+    return "";
   }
 }
 
@@ -305,6 +325,26 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
 
   reqLogger.logProviderResponse(providerResponse.status, providerResponse.statusText, providerResponse.headers, responseBody);
+
+  // Degenerate-output guard (non-stream): a model stuck in a repetition loop
+  // produced garbage. Treat the leg as FAILED so the account/combo fallback can
+  // retry on a healthier model instead of returning junk to the client.
+  {
+    const text = extractAssistantTextForGuard(responseBody);
+    if (text) {
+      const hit = detectDegenerateLoop(text.length > DEGENERATE_TAIL_WINDOW ? text.slice(-DEGENERATE_TAIL_WINDOW) : text);
+      if (hit) {
+        console.warn(`[DEGENERATE] ${provider || "?"}/${model || "?"} conn=${(connectionId || "").slice(0, 8)} — non-stream repetition loop (unit ${JSON.stringify(hit.unit)}); failing over`);
+        // Demote this provider/model in every combo so retries avoid it.
+        if (provider && model) {
+          try { noteTargetFailure(null, `${provider}/${model}`); } catch { /* best-effort */ }
+        }
+        appendLog({ status: "FAILED 502 degenerate_output" });
+        return createErrorResult(HTTP_STATUS.BAD_GATEWAY, `Upstream model produced degenerate repetitive output (loop unit ${JSON.stringify(hit.unit)}); please retry`);
+      }
+    }
+  }
+
   if (onRequestSuccess) {
     Promise.resolve()
       .then(onRequestSuccess)
@@ -332,6 +372,11 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   // Fix finish_reason for tool_calls: some providers return non-standard values (e.g. "other")
   if (translatedResponse?.choices?.[0]) {
     const choice = translatedResponse.choices[0];
+    // Normalize tool-related aliases ("tool-calls", "tool_use", …) to the OpenAI enum.
+    const normalizedFinish = normalizeToolFinishReason(choice.finish_reason);
+    if (normalizedFinish !== choice.finish_reason) {
+      choice.finish_reason = normalizedFinish;
+    }
     const msg = choice.message;
     const hasToolCalls = Array.isArray(msg?.tool_calls) && msg.tool_calls.length > 0;
     if (hasToolCalls && choice.finish_reason !== "tool_calls") {

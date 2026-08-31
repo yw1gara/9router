@@ -13,6 +13,7 @@ const DEFAULT_SETTINGS = {
   tailscaleUrl: "",
   stickyRoundRobinLimit: 3,
   providerStrategies: {},
+  providerRecovery: {},
   quotaVisibility: {},
   comboStrategy: "fallback",
   comboStickyRoundRobinLimit: 1,
@@ -61,12 +62,38 @@ const DEFAULT_SETTINGS = {
   pxpipeAutoInstall: true,
   pxpipeMinChars: 25000,
   pxpipeTimeoutMs: 15000,
+  providerRecovery: {},
 };
 
 async function readRaw() {
   const db = await getAdapter();
   const row = db.get(`SELECT data FROM settings WHERE id = 1`);
   return row ? parseJson(row.data, {}) : {};
+}
+
+// ─── Short-TTL raw cache ──────────────────────────────────────────────────────
+// getSettings() sits on the hottest path (called per account attempt inside the
+// chat fallback loop); every call used to hit SQLite + JSON.parse + merge.
+// Cache only the RAW row (not the merged object) and re-run mergeWithDefaults
+// per call, so callers keep getting a fresh object exactly as before.
+// Invalidated on updateSettings()/importDb; TTL bounds staleness from any
+// out-of-process writer.
+let _rawCache = null; // { raw, at }
+const RAW_CACHE_TTL_MS = 5_000;
+
+function writeRawCache(raw) {
+  _rawCache = { raw, at: Date.now() };
+}
+
+export function invalidateSettingsCache() {
+  _rawCache = null;
+}
+
+async function readRawCached() {
+  if (_rawCache && Date.now() - _rawCache.at < RAW_CACHE_TTL_MS) return _rawCache.raw;
+  const raw = await readRaw();
+  writeRawCache(raw);
+  return raw;
 }
 
 // Merge raw settings with defaults; backward-compat for missing keys
@@ -89,7 +116,7 @@ export function mergeWithDefaults(raw) {
 }
 
 export async function getSettings() {
-  const raw = await readRaw();
+  const raw = await readRawCached();
   return mergeWithDefaults(raw);
 }
 
@@ -106,6 +133,30 @@ export async function updateSettings(updates) {
       [stringifyJson(next)],
     );
   });
+  writeRawCache(next);
+  return mergeWithDefaults(next);
+}
+
+// Atomically merge one provider's recovery config without replacing sibling configs.
+export async function updateProviderRecoverySettings(provider, config) {
+  const db = await getAdapter();
+  let next;
+  db.transaction(function () {
+    const row = db.get(`SELECT data FROM settings WHERE id = 1`);
+    const current = row ? parseJson(row.data, {}) : {};
+    next = {
+      ...current,
+      providerRecovery: {
+        ...(current.providerRecovery || {}),
+        [provider]: config,
+      },
+    };
+    db.run(
+      `INSERT INTO settings(id, data) VALUES(1, ?) ON CONFLICT(id) DO UPDATE SET data = excluded.data`,
+      [stringifyJson(next)],
+    );
+  });
+  writeRawCache(next);
   return mergeWithDefaults(next);
 }
 

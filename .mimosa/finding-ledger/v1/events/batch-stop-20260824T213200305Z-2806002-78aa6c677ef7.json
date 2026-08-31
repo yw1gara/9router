@@ -1,0 +1,82 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20260824T213200305Z-2806002-78aa6c677ef7",
+  "runId": "20260824T213200305Z-2806002-78aa6c677ef7",
+  "runStatus": "completed",
+  "coverage": {
+    "status": "complete",
+    "reasons": []
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "97e2e3b59484399d878505e9af4973e66b903c58",
+  "diffHash": "c230eabe875d5c469785d6066baa1926afe4ebcc29eab3b10dbc858686300dbf",
+  "rulesVersion": "unavailable",
+  "sessionHash": "f7623eb6e70d952a3b4a2b6199f3523861b946ecab37a179044351f077523bdf",
+  "reportRef": ".mimosa/reports/task-review-sess_395af2d1-f004-4d30-9718-6347ce3f154d-20260824T213200305Z-2806002-78aa6c677ef7.json",
+  "events": [
+    {
+      "eventId": "hook-95a92bc98536718d30161c5b462b9acd",
+      "findingId": "mimosa-7bf3ce58701d051502a4633a",
+      "type": "finding_blocked",
+      "at": "2026-08-24T21:29:35.171Z",
+      "identity": {
+        "projectRelativeFile": "open-sse/handlers/chatCore.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 430,
+      "endLine": 430,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe"
+      },
+      "sequence": 0
+    },
+    {
+      "eventId": "hook-a003cb31787515356d539b7f87691f88",
+      "findingId": "mimosa-7bf3ce58701d051502a4633a",
+      "type": "finding_blocked",
+      "at": "2026-08-24T21:30:01.288Z",
+      "identity": {
+        "projectRelativeFile": "open-sse/handlers/chatCore.js",
+        "ruleId": "security",
+        "codeEvidenceHash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe",
+        "confidence": "stable"
+      },
+      "scope": "direct",
+      "line": 430,
+      "endLine": 430,
+      "reasonCode": "deny",
+      "reportedToAgent": true,
+      "evidence": {
+        "kind": "source",
+        "boundary": "candidate",
+        "producer": "deterministic",
+        "evidenceHash": "5467ee07dda36f9b81448a82393223ce2ce0e1fda76425ec203af164fbb778fe"
+      },
+      "sequence": 1
+    }
+  ],
+  "observedFindingIds": [
+    "mimosa-04a1e6031630e66c83012940",
+    "mimosa-7bf3ce58701d051502a4633a",
+    "mimosa-9312ec5f61a6ffd27542c273"
+  ],
+  "verifiedFiles": [
+    {
+      "file": "open-sse/handlers/chatCore.js",
+      "direct": "complete",
+      "projectContext": "partial"
+    }
+  ],
+  "recordedAt": "2026-08-24T21:32:00.751Z"
+}

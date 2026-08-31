@@ -1,6 +1,11 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useSyncExternalStore,
+} from "react";
 import PropTypes from "prop-types";
 import {
   Card,
@@ -11,6 +16,7 @@ import {
 } from "@/shared/components";
 import ProviderIcon from "@/shared/components/ProviderIcon";
 import { getProviderIconSrc } from "@/shared/utils/providerIcon";
+import { sortProvidersByStatus } from "@/shared/utils/providerStatusSorting";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS } from "@/shared/constants/config";
 import {
   FREE_PROVIDERS,
@@ -94,6 +100,60 @@ function getConnectionErrorTag(connection) {
 }
 
 const APIKEY_INITIAL_VISIBLE = 20;
+const VALID_SORT_MODES = new Set([
+  "name",
+  "connection",
+  "active-first",
+  "unavailable-first",
+  "default",
+]);
+const OAUTH_SORT_STORAGE = "9router:providers:sort:oauth";
+const FREE_SORT_STORAGE = "9router:providers:sort:free";
+const KEY_PROVIDER_SORT_STORAGE = "9router:providers:sort:key-provider";
+const sortModeFallbacks = new Map();
+
+function subscribeToSortMode(callback) {
+  window.addEventListener("storage", callback);
+  window.addEventListener("provider-sort-change", callback);
+  return () => {
+    window.removeEventListener("storage", callback);
+    window.removeEventListener("provider-sort-change", callback);
+  };
+}
+
+function getStoredSortMode(key) {
+  try {
+    const value = window.localStorage.getItem(key);
+    if (VALID_SORT_MODES.has(value)) {
+      sortModeFallbacks.set(key, value);
+      return value;
+    }
+  } catch {
+    // Fall through to the in-memory value.
+  }
+  return sortModeFallbacks.get(key) || "name";
+}
+
+function setStoredSortMode(key, value) {
+  if (!VALID_SORT_MODES.has(value)) return;
+  sortModeFallbacks.set(key, value);
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // The in-memory value keeps sorting functional for this tab.
+  }
+  window.dispatchEvent(new Event("provider-sort-change"));
+}
+
+function usePersistentSortMode(key) {
+  const getSnapshot = useCallback(() => getStoredSortMode(key), [key]);
+  const value = useSyncExternalStore(subscribeToSortMode, getSnapshot, () => "name");
+  const setValue = useCallback(
+    (nextValue) => setStoredSortMode(key, nextValue),
+    [key],
+  );
+  return [value, setValue];
+}
 
 export default function ProvidersPage() {
   const [connections, setConnections] = useState([]);
@@ -105,6 +165,15 @@ export default function ProvidersPage() {
     useState(false);
   const [testingMode, setTestingMode] = useState(null);
   const [testResults, setTestResults] = useState(null);
+  const [oauthSortMode, setOauthSortMode] = usePersistentSortMode(
+    OAUTH_SORT_STORAGE,
+  );
+  const [freeSortMode, setFreeSortMode] = usePersistentSortMode(
+    FREE_SORT_STORAGE,
+  );
+  const [apikeySortMode, setApikeySortMode] = usePersistentSortMode(
+    KEY_PROVIDER_SORT_STORAGE,
+  );
   const notify = useNotificationStore();
   const searchQuery = useHeaderSearchStore((s) => s.query);
   const registerSearch = useHeaderSearchStore((s) => s.register);
@@ -114,6 +183,7 @@ export default function ProvidersPage() {
     registerSearch("Search providers...");
     return () => unregisterSearch();
   }, [registerSearch, unregisterSearch]);
+
 
   const matchSearch = (name) =>
     !searchQuery.trim() ||
@@ -144,6 +214,40 @@ export default function ProvidersPage() {
       if (ca !== cb) return cb - ca;
       return (a.name || "").localeCompare(b.name || "");
     });
+
+  const applySort = (entries, mode, getAuthTypes) => {
+    if (mode === "default") return entries;
+
+    if (mode === "active-first" || mode === "unavailable-first") {
+      const providers = entries.map(([key, info]) => ({
+        id: key,
+        name: info.name,
+        connections: connections.filter((connection) => {
+          const authTypes = getAuthTypes(info, key);
+          const allowedTypes = Array.isArray(authTypes) ? authTypes : [authTypes];
+          return connection.provider === key && allowedTypes.includes(connection.authType);
+        }),
+      }));
+      const rankById = new Map(
+        sortProvidersByStatus(providers, mode).map((provider, index) => [
+          provider.id,
+          index,
+        ]),
+      );
+      return [...entries].sort(
+        ([aKey], [bKey]) => rankById.get(aKey) - rankById.get(bKey),
+      );
+    }
+
+    return [...entries].sort(([aKey, aInfo], [bKey, bInfo]) => {
+      if (mode === "connection") {
+        const aTotal = getProviderStats(aKey, getAuthTypes(aInfo, aKey)).total;
+        const bTotal = getProviderStats(bKey, getAuthTypes(bInfo, bKey)).total;
+        if (bTotal !== aTotal) return bTotal - aTotal;
+      }
+      return (aInfo.name || "").localeCompare(bInfo.name || "");
+    });
+  };
 
   useEffect(() => {
     const fetchData = async () => {
@@ -307,16 +411,21 @@ export default function ProvidersPage() {
     return ["oauth", "apikey", "api_key"];
   };
 
-  const oauthEntries = sortByPriority(
-    Object.entries(OAUTH_PROVIDERS).filter(([, info]) => !info.hidden && matchSearch(info.name)),
-    "oauth",
+  const oauthEntries = applySort(
+    sortByPriority(
+      Object.entries(OAUTH_PROVIDERS).filter(
+        ([, info]) => !info.hidden && matchSearch(info.name),
+      ),
+      "oauth",
+    ),
+    oauthSortMode,
+    dualAuthTypes,
   );
+
   const freeEntries = Object.entries(FREE_PROVIDERS)
     .filter(([, info]) => !info.hidden && matchSearch(info.name))
-    .sort(([, a], [, b]) => (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0));
-  // Free Tier cards may be oauth-only (e.g. kimchi) or dual-auth, so count via
-  // dualAuthTypes per provider instead of a fixed "apikey" — otherwise oauth
-  // connections are invisible here (mismatch with the detail page).
+    .sort(([, a], [, b]) => (b.noAuth ? 1 : 0) - (a.noAuth ? 1 : 0))
+    .map(([key, info]) => [key, info, "free"]);
   const freeTierEntries = Object.entries(FREE_TIER_PROVIDERS)
     .filter(
       ([, info]) =>
@@ -334,21 +443,31 @@ export default function ProvidersPage() {
       const cb = getProviderStats(kb, dualAuthTypes(b, kb)).connected > 0 ? 0 : 1;
       if (ca !== cb) return ca - cb;
       return (a.name || "").localeCompare(b.name || "");
-    });
-  // API Key: connected providers first, then alphabetical by name
-  const apikeyEntries = Object.entries(APIKEY_PROVIDERS)
-    .filter(
-      ([, info]) =>
-        !info.hidden &&
-        (info.serviceKinds ?? ["llm"]).includes("llm") &&
-        matchSearch(info.name),
-    )
-    .sort(([ka, a], [kb, b]) => {
-      const ca = getProviderStats(ka, "apikey").total > 0 ? 0 : 1;
-      const cb = getProviderStats(kb, "apikey").total > 0 ? 0 : 1;
-      if (ca !== cb) return ca - cb;
-      return (a.name || "").localeCompare(b.name || "");
-    });
+    })
+    .map(([key, info]) => [key, info, "tier"]);
+  const freeSectionEntries = applySort(
+    [...freeEntries, ...freeTierEntries],
+    freeSortMode,
+    dualAuthTypes,
+  );
+
+  const apikeyEntries = applySort(
+    Object.entries(APIKEY_PROVIDERS)
+      .filter(
+        ([, info]) =>
+          !info.hidden &&
+          (info.serviceKinds ?? ["llm"]).includes("llm") &&
+          matchSearch(info.name),
+      )
+      .sort(([ka, a], [kb, b]) => {
+        const ca = getProviderStats(ka, "apikey").total > 0 ? 0 : 1;
+        const cb = getProviderStats(kb, "apikey").total > 0 ? 0 : 1;
+        if (ca !== cb) return ca - cb;
+        return (a.name || "").localeCompare(b.name || "");
+      }),
+    apikeySortMode,
+    () => "apikey",
+  );
   const isApikeySearching = !!searchQuery.trim();
   const visibleApikeyEntries =
     isApikeySearching || showAllApikey
@@ -367,8 +486,7 @@ export default function ProvidersPage() {
 
   const hasAnyResult =
     oauthEntries.length > 0 ||
-    freeEntries.length > 0 ||
-    freeTierEntries.length > 0 ||
+    freeSectionEntries.length > 0 ||
     apikeyEntries.length > 0 ||
     compatibleProviders.length > 0 ||
     anthropicCompatibleProviders.length > 0;
@@ -445,6 +563,11 @@ export default function ProvidersPage() {
           </h2>
           <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
             <ModelAvailabilityBadge />
+            <SortSelector
+              value={oauthSortMode}
+              onChange={setOauthSortMode}
+              label="Sort OAuth providers"
+            />
             <button
               onClick={() => handleBatchTest("oauth")}
               disabled={!!testingMode}
@@ -490,9 +613,15 @@ export default function ProvidersPage() {
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
             Free Tier Providers
           </h2>
-          <button
-            onClick={() => handleBatchTest("free")}
-            disabled={!!testingMode}
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <SortSelector
+              value={freeSortMode}
+              onChange={setFreeSortMode}
+              label="Sort Free Tier providers"
+            />
+            <button
+              onClick={() => handleBatchTest("free")}
+              disabled={!!testingMode}
             className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 ${
               testingMode === "free"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -509,34 +638,29 @@ export default function ProvidersPage() {
             {testingMode === "free" ? "Testing..." : "Test All"}
           </button>
         </div>
+        </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
-          {freeEntries.map(([key, info]) => {
-            // Dual-auth (e.g. kiro): count/toggle oauth + apikey/api_key so the
-            // card total matches the provider detail page.
+          {freeSectionEntries.map(([key, info, source]) => {
             const freeAuthTypes = dualAuthTypes(info, key);
-            return (
-              <ProviderCard
-                key={key}
-                providerId={key}
-                provider={info}
-                stats={getProviderStats(key, freeAuthTypes)}
-                authType="free"
-                onToggle={(active) =>
-                  handleToggleProvider(key, freeAuthTypes, active)
-                }
-              />
-            );
-          })}
-          {freeTierEntries.map(([key, info]) => {
-            const freeAuthTypes = dualAuthTypes(info, key);
-            return (
+            const sharedProps = {
+              providerId: key,
+              provider: info,
+              stats: getProviderStats(key, freeAuthTypes),
+              onToggle: (active) =>
+                handleToggleProvider(key, freeAuthTypes, active),
+            };
+
+            return source === "free" ? (
+              <ProviderCard key={key} {...sharedProps} authType="free" />
+            ) : (
               <ApiKeyProviderCard
                 key={key}
-                providerId={key}
-                provider={info}
-                stats={getProviderStats(key, freeAuthTypes)}
-                authType={Array.isArray(freeAuthTypes) ? (freeAuthTypes[0] ?? "apikey") : freeAuthTypes}
-                onToggle={(active) => handleToggleProvider(key, freeAuthTypes, active)}
+                {...sharedProps}
+                authType={
+                  Array.isArray(freeAuthTypes)
+                    ? (freeAuthTypes[0] ?? "apikey")
+                    : freeAuthTypes
+                }
               />
             );
           })}
@@ -551,9 +675,15 @@ export default function ProvidersPage() {
           <h2 className="text-lg sm:text-xl font-semibold flex items-center gap-2 leading-tight">
             API Key Providers{" "}
           </h2>
-          <button
-            onClick={() => handleBatchTest("apikey")}
-            disabled={!!testingMode}
+          <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
+            <SortSelector
+              value={apikeySortMode}
+              onChange={setApikeySortMode}
+              label="Sort API Key providers"
+            />
+            <button
+              onClick={() => handleBatchTest("apikey")}
+              disabled={!!testingMode}
             className={`flex w-full items-center justify-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors sm:w-auto sm:py-1.5 ${
               testingMode === "apikey"
                 ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -569,6 +699,7 @@ export default function ProvidersPage() {
             </span>
             {testingMode === "apikey" ? "Testing..." : "Test All"}
           </button>
+        </div>
         </div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3 xl:grid-cols-4">
           {visibleApikeyEntries.map(([key, info]) => (
@@ -664,6 +795,32 @@ export default function ProvidersPage() {
     </div>
   );
 }
+
+function SortSelector({ value, onChange, label }) {
+  return (
+    <div className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-bg px-2 py-1.5 sm:py-1 text-xs text-text-muted">
+      <span className="material-symbols-outlined text-[14px]">sort</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="bg-transparent text-text-main outline-none cursor-pointer"
+        aria-label={label}
+      >
+        <option value="name">Sort: Name</option>
+        <option value="connection">Sort: Connection</option>
+        <option value="active-first">Sort: Active first</option>
+        <option value="unavailable-first">Sort: Unavailable first</option>
+        <option value="default">Sort: Default</option>
+      </select>
+    </div>
+  );
+}
+
+SortSelector.propTypes = {
+  value: PropTypes.string.isRequired,
+  onChange: PropTypes.func.isRequired,
+  label: PropTypes.string.isRequired,
+};
 
 function ProviderCard({ providerId, provider, stats, authType, onToggle }) {
   const { connected, error, errorCode, errorTime, allDisabled } = stats;

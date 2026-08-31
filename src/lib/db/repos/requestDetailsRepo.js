@@ -144,7 +144,21 @@ export async function saveRequestDetail(detail) {
   const config = await getObservabilityConfig();
   if (!config.enabled) {return;}
 
-  writeBuffer.push(detail);
+  // Truncate heavy payloads at capture time, not flush time: full LLM bodies
+  // (messages arrays, translated provider requests, accumulated responses) are
+  // multi-MB object graphs; holding up to `batchSize` of them for
+  // `flushIntervalMs` was the main source of memory spikes under load.
+  const detailSnapshot = {
+    ...detail,
+    request: truncateField(detail.request, config.maxJsonSize),
+    providerRequest: truncateField(detail.providerRequest, config.maxJsonSize),
+    providerResponse: truncateField(detail.providerResponse, config.maxJsonSize),
+    response: truncateField(detail.response, config.maxJsonSize),
+  };
+  writeBuffer.push(detailSnapshot);
+
+  // Safety cap so a flush stall can never grow the buffer unbounded.
+  if (writeBuffer.length > 500) { writeBuffer.splice(0, writeBuffer.length - 500); }
 
   // Trigger immediate flush if batch threshold reached.
   // flushToDatabase() drains entire buffer in a loop, so all pushes during await are persisted.

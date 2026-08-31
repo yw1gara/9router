@@ -79,7 +79,18 @@ async function loadActiveConnections() {
 
 async function refreshOne(connection) {
   const { checkAndRefreshToken } = await import("./tokenRefresh.js");
-  return checkAndRefreshToken(connection.provider, connection, { force: true });
+  const result = await checkAndRefreshToken(connection.provider, connection, { force: true });
+  // Surface permanent auth failures (e.g. Codex token invalidated) without
+  // logging any token material.
+  if (result?.testStatus === "unavailable" || result?.lastError) {
+    log.warn("BG_TOKEN_REFRESH", "Connection unavailable after refresh", {
+      id: connection.id,
+      provider: connection.provider,
+      errorCode: result.errorCode || null,
+      error: result.lastError?.slice(0, 120) || null,
+    });
+  }
+  return result;
 }
 
 /**
@@ -142,8 +153,14 @@ export async function runBackgroundTokenRefreshTick(deps = {}) {
  * @param {{ intervalMs?: number }} [opts]
  * @returns {boolean} true if started this call
  */
+// The scheduler can be loaded twice in one process (raw source via
+// custom-server.js + webpack bundle via initializeApp.js), so a module-scope
+// flag alone cannot deduplicate — key it on globalThis instead.
+const STARTED_FLAG = Symbol.for("ninerouter.bgTokenRefresh.started");
+
 export function startBackgroundTokenRefresh({ intervalMs } = {}) {
   if (started) return false;
+  if (globalThis[STARTED_FLAG]) return false;
   if (isTruthyEnv(process.env.DISABLE_BACKGROUND_TOKEN_REFRESH)) {
     log.info("BG_TOKEN_REFRESH", "Disabled via DISABLE_BACKGROUND_TOKEN_REFRESH");
     return false;
@@ -154,6 +171,7 @@ export function startBackgroundTokenRefresh({ intervalMs } = {}) {
   }
 
   started = true;
+  globalThis[STARTED_FLAG] = true;
   const period = Number.isFinite(intervalMs) && intervalMs > 0 ? intervalMs : DEFAULT_INTERVAL_MS;
 
   const safeTick = () => {
@@ -190,6 +208,7 @@ export function stopBackgroundTokenRefresh() {
   }
   if (started) {
     started = false;
+    globalThis[STARTED_FLAG] = false;
     log.info("BG_TOKEN_REFRESH", "Scheduler stopped");
   }
 }

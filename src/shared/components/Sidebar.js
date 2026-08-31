@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG, UPDATER_CONFIG } from "@/shared/constants/config";
 import { MEDIA_PROVIDER_KINDS } from "@/shared/constants/providers";
+import { AUTOMATION_KINDS } from "@/shared/constants/automations";
 import { useCopyToClipboard } from "@/shared/hooks/useCopyToClipboard";
 import Button from "./Button";
 import { ConfirmModal } from "./Modal";
@@ -35,13 +36,16 @@ const debugItems = [
 ];
 
 const systemItems = [
+  { href: "/dashboard/freebuff", label: "FreeBuff", icon: "bolt" },
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
+  { href: "/dashboard/mail-recovery", label: "Mail Recovery", icon: "mail_lock" },
   { href: "/dashboard/skills", label: "Skills", icon: "extension" },
 ];
 
 export default function Sidebar({ onClose }) {
   const pathname = usePathname();
   const [mediaOpen, setMediaOpen] = useState(false);
+  const [automationsOpen, setAutomationsOpen] = useState(false);
   const [showRemoteModal, setShowRemoteModal] = useState(false);
   const [isDisconnected, setIsDisconnected] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -236,6 +240,43 @@ export default function Sidebar({ onClose }) {
                   <span className="material-symbols-outlined text-[16px]">{COMBINED_WEB_ITEM.icon}</span>
                   <span className="text-sm">{COMBINED_WEB_ITEM.label}</span>
                 </Link>
+              </div>
+            )}
+
+            {/* Automations accordion */}
+            <button
+              onClick={() => setAutomationsOpen((v) => !v)}
+              className={cn(
+                "w-full flex items-center gap-3 px-3 py-1 rounded-lg transition-all group",
+                pathname.startsWith("/dashboard/automations")
+                  ? "bg-primary/10 text-primary"
+                  : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+              )}
+            >
+              <span className="material-symbols-outlined text-[18px]">smart_toy</span>
+              <span className="text-[13px] font-medium flex-1 text-left">Automations</span>
+              <span className="material-symbols-outlined text-[14px] transition-transform" style={{ transform: automationsOpen ? "rotate(180deg)" : "rotate(0deg)" }}>
+                expand_more
+              </span>
+            </button>
+            {automationsOpen && (
+              <div className="pl-4">
+                {AUTOMATION_KINDS.map((kind) => (
+                  <Link
+                    key={kind.id}
+                    href={`/dashboard/automations/${kind.id}`}
+                    onClick={onClose}
+                    className={cn(
+                      "flex items-center gap-3 px-4 py-1 rounded-lg transition-all group",
+                      pathname.startsWith(`/dashboard/automations/${kind.id}`)
+                        ? "bg-primary/10 text-primary"
+                        : "text-text-muted hover:bg-surface-2 hover:text-text-main"
+                    )}
+                  >
+                    <span className="material-symbols-outlined text-[16px]">{kind.icon}</span>
+                    <span className="text-sm">{kind.label}</span>
+                  </Link>
+                ))}
               </div>
             )}
 

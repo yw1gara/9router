@@ -91,7 +91,19 @@ http.createServer = (...args) => {
     }
     const chunks = [head];
     let received = head.length;
+    let finished = false;
+    // Once we emit the upgrade, the server detaches this socket; from here on we
+    // own it. Without an error listener a routine ECONNRESET re-throws as an
+    // uncaughtException and kills the process.
+    socket.on("error", () => socket.destroy());
+    // A client that announces content-length it never sends must not pin the
+    // socket (and the buffered body) forever.
+    const deadline = setTimeout(() => socket.destroy(), 120_000);
+    deadline.unref?.();
     const serve = () => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(deadline);
       // Replay the upgraded request through the existing HTTP/1.1 handler.
       const replay = new http.IncomingMessage(socket);
       Object.assign(replay, { method: req.method, url: req.url, headers: req.headers, complete: true });
@@ -124,6 +136,16 @@ http.createServer = (...args) => {
   };
   return server;
 };
+
+// Last-resort safety net: log and exit non-zero so pm2 restarts with evidence,
+// instead of a bare stack on stderr for whoever owns the console.
+process.on("uncaughtException", (err) => {
+  console.error("[UNCAUGHT_EXCEPTION]", err && err.stack ? err.stack : err);
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[UNHANDLED_REJECTION]", reason && reason.stack ? reason.stack : reason);
+});
 
 if (require.main === module) {
   const standalone = path.join(__dirname, "server.js");

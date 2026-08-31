@@ -123,6 +123,10 @@ import p120 from "./fish-audio.js";
 import p121 from "./alitp-intl.js";
 import p122 from "./orcarouter.js";
 import p123 from "./opencode-zen.js";
+import p124 from "./zenmux.js";
+import p125 from "./freebuff.js";
+import p126 from "./tokenharbor.js";
+import p127 from "./b-ai.js";
 
 export default [
   p0,
@@ -247,4 +251,8 @@ export default [
   p121,
   p122,
   p123,
+  p124,
+  p125,
+  p126,
+  p127,
 ];

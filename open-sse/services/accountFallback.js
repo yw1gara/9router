@@ -1,4 +1,4 @@
-import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS } from "../config/errorConfig.js";
+import { ERROR_RULES, BACKOFF_CONFIG, TRANSIENT_COOLDOWN_MS, MAX_MODEL_LOCK_COOLDOWN_MS, TIMEOUT_COOLDOWN_MS, TIMEOUT_STATUS_CODES, TIMEOUT_ERROR_TEXT_RE } from "../config/errorConfig.js";
 import {
   getCircuitBreaker,
   getAllCircuitBreakerStatuses,
@@ -32,6 +32,15 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
     ? (typeof errorText === "string" ? errorText : JSON.stringify(errorText)).toLowerCase()
     : "";
 
+  // Timeouts first, before any other rule: a connect/TCP/header timeout means
+  // the endpoint was slow or unreachable, not that the key/model is bad. Park
+  // the target for a short FIXED cooldown that model-lock accumulation never
+  // escalates (fixed: true) — repeated timeouts must not compound into the
+  // 30m×2^n ladder and lock combo targets for hours ("reset after 27m").
+  if (TIMEOUT_STATUS_CODES.has(status) || (lowerError && TIMEOUT_ERROR_TEXT_RE.test(lowerError))) {
+    return { shouldFallback: true, cooldownMs: TIMEOUT_COOLDOWN_MS, fixed: true };
+  }
+
   for (const rule of ERROR_RULES) {
     // Text-based rule: match substring in error message
     if (rule.text && lowerError && lowerError.includes(rule.text)) {
@@ -39,7 +48,9 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
         const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
         return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
       }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
+      // `fixed` rules (e.g. free-tier key limits) report a fixed cooldown that
+      // must not be escalated by model-lock accumulation.
+      return { shouldFallback: true, cooldownMs: rule.cooldownMs, fixed: rule.fixed === true };
     }
 
     // Status-based rule: match HTTP status code
@@ -48,8 +59,15 @@ export function checkFallbackError(status, errorText, backoffLevel = 0) {
         const newLevel = Math.min(backoffLevel + 1, BACKOFF_CONFIG.maxLevel);
         return { shouldFallback: true, cooldownMs: getQuotaCooldown(newLevel), newBackoffLevel: newLevel };
       }
-      return { shouldFallback: true, cooldownMs: rule.cooldownMs };
+      return { shouldFallback: true, cooldownMs: rule.cooldownMs, fixed: rule.fixed === true };
     }
+  }
+
+  // Request-dependent 4xx (malformed body, unsupported param, oversized payload)
+  // fail identically on every account — falling over would lock the whole
+  // provider's accounts for a client-side error. Surface it to the client.
+  if ([400, 402, 413, 414, 422, 431].includes(status)) {
+    return { shouldFallback: false, cooldownMs: 0 };
   }
 
   // Default: transient cooldown for any unmatched error
@@ -157,14 +175,136 @@ export function buildModelLockUpdate(model, cooldownMs) {
 }
 
 /**
+ * Prefix for per-model cooldown accumulation state: `modelLockAcc_<model>` =
+ * { count, until, ms }. Deliberately NOT starting with `modelLock_` so the
+ * lock-scanning helpers above never see it as a lock expiry.
+ */
+export const MODEL_LOCK_ACC_PREFIX = "modelLockAcc_";
+export const MODEL_LOCK_META_PREFIX = "modelLockMeta_";
+
+/** Build the flat field key for a model's machine-readable lock metadata. */
+export function getModelLockMetaKey(model) {
+  return `${MODEL_LOCK_META_PREFIX}${model || "__all"}`;
+}
+
+/** Build the flat field key for a model's accumulation state. */
+export function getModelLockAccKey(model) {
+  return `${MODEL_LOCK_ACC_PREFIX}${model || "__all"}`;
+}
+
+/** Read the accumulation count for display (0 = no accumulated history). */
+export function getModelLockAccCount(connection, model) {
+  const acc = connection?.[getModelLockAccKey(model)];
+  return Number.isFinite(acc?.count) && acc.count > 0 ? acc.count : 0;
+}
+
+/**
+ * Accumulate a model-lock cooldown: repeated failures on the same model double
+ * the lock duration (base × 2^(n-1)), capped at MAX_MODEL_LOCK_COOLDOWN_MS
+ * (1 day). The accumulation RESETS to 1 once the previous lock has been over
+ * for longer than its own duration (grace window) without a new failure —
+ * i.e. a model that stays healthy for one cooldown-length starts fresh.
+ *
+ * PURE — reads prior state from the connection record, returns the escalated
+ * cooldown plus the update object to persist.
+ *
+ * @param {object|null} connection - connection record (may be null → fresh start)
+ * @param {string|null} model - model name (null/__all = account-wide lock)
+ * @param {number} baseCooldownMs - cooldown before accumulation
+ * @param {object} [opts] - { now = Date.now, maxMs = MAX_MODEL_LOCK_COOLDOWN_MS }
+ * @returns {{ cooldownMs: number, accUpdate: object }} accUpdate has the
+ *   `modelLockAcc_<model>` field to merge into the connection update.
+ */
+export function accumulateModelLockCooldown(connection, model, baseCooldownMs, opts = {}) {
+  const now = opts.now ?? Date.now;
+  const nowMs = typeof now === "function" ? now() : now;
+  const maxMs = opts.maxMs ?? MAX_MODEL_LOCK_COOLDOWN_MS;
+  const key = getModelLockAccKey(model);
+  const prev = connection?.[key];
+
+  let count = 1;
+  if (prev && Number.isFinite(prev.count) && prev.count > 0) {
+    // Grace window: if the previous lock expired longer ago than its own
+    // duration, the model has been healthy for a full cooldown-length —
+    // start the ladder over instead of doubling on top of a stale count.
+    // (Without this, rare sporadic failures compound 30m → 1h → 2h … and
+    // permanently shrink the healthy-target pool `isModelLockActive` sees.)
+    // A model that keeps failing right after each expiry stays past the
+    // window and keeps escalating.
+    const prevUntilMs = Date.parse(prev.until);
+    const prevMs = Number.isFinite(prev.ms) ? prev.ms : 0;
+    const inGrace = Number.isFinite(prevUntilMs) && nowMs > prevUntilMs + prevMs;
+    count = inGrace ? 1 : prev.count + 1;
+  }
+
+  const raw = baseCooldownMs * Math.pow(2, count - 1);
+  const cooldownMs = Math.min(raw, maxMs);
+  const until = new Date(nowMs + cooldownMs).toISOString();
+  return {
+    cooldownMs,
+    accUpdate: { [key]: { count, until, ms: cooldownMs } },
+  };
+}
+
+/**
  * Build update object to clear all model locks on a connection.
+ * Also clears the matching modelLockAcc_* accumulation state.
  */
 export function buildClearModelLocksUpdate(connection) {
   const cleared = {};
   for (const key of Object.keys(connection)) {
     if (key.startsWith(MODEL_LOCK_PREFIX)) cleared[key] = null;
+    if (key.startsWith(MODEL_LOCK_ACC_PREFIX)) cleared[key] = null;
+    if (key.startsWith(MODEL_LOCK_META_PREFIX)) cleared[key] = null;
   }
   return cleared;
+}
+
+// ─── Denied-target registry (dead models) ────────────────────────────────────
+// A model whose promotion/subscription has ENDED (e.g. OpenCode "Free
+// promotion has ended") is dead from every IP and every account. The noAuth
+// "Public" connection has no DB row to lock, so without this registry the
+// dead model got retried on EVERY request forever. Combos skip denied
+// targets until the TTL expires (cheap re-probe afterwards).
+const TARGET_DENIED_TTL_MS = 30 * 60 * 1000;
+const deniedTargets = new Map(); // `provider/model` -> { until, reason }
+const DENIED_MAX = 500;
+
+/** Mark `provider/model` as denied (dead) for ttlMs (default 30 min). */
+export function noteTargetDenied(modelStr, ttlMs = TARGET_DENIED_TTL_MS, reason = "") {
+  if (!modelStr) return;
+  const now = Date.now();
+  if (deniedTargets.size >= DENIED_MAX) {
+    for (const [k, e] of deniedTargets) if (e.until <= now) deniedTargets.delete(k);
+    if (deniedTargets.size >= DENIED_MAX) {
+      const oldest = deniedTargets.keys().next().value;
+      if (oldest !== undefined) deniedTargets.delete(oldest);
+    }
+  }
+  deniedTargets.set(modelStr, { until: now + ttlMs, reason: reason || "" });
+}
+
+/** Sync check: is this `provider/model` currently denied? */
+export function isTargetDenied(modelStr, now = Date.now()) {
+  if (!modelStr) return false;
+  const entry = deniedTargets.get(modelStr);
+  if (!entry) return false;
+  if (entry.until <= now) {
+    deniedTargets.delete(modelStr);
+    return false;
+  }
+  return true;
+}
+
+/** Denial entry (with upstream reason text) if active, else null. */
+export function getTargetDenial(modelStr, now = Date.now()) {
+  if (!modelStr || !isTargetDenied(modelStr, now)) return null;
+  return deniedTargets.get(modelStr) || null;
+}
+
+/** Clear denial marks (tests / manual reset). */
+export function resetTargetDenials() {
+  deniedTargets.clear();
 }
 
 /**
@@ -295,7 +435,7 @@ export function recordProviderFailure(provider, statusCode, errorText, log, conn
   breaker._onFailure({ statusCode, message: errorText });
 
   if (!breaker.canExecute()) {
-    log?.warn?.(`[ProviderFailure] ${breakerKey}: circuit breaker opened after ${breaker.failureCount} failures`);
+    log?.warn?.("ProviderFailure", `${breakerKey}: circuit breaker opened after ${breaker.failureCount} failures`);
   }
 }
 
@@ -380,6 +520,13 @@ export function getProviderShortestCooldownMs(provider) {
 export function isModelAccessDeniedError(status, errorText) {
   const text = typeof errorText === "string" ? errorText.toLowerCase() : "";
   if (!text && !status) return false;
+
+  // OpenCode returns a PERMANENT model denial ("free promotion has ended …
+  // subscribing to OpenCode Go") as 401 ModelError. Plain 401 stays an auth
+  // error — only these unambiguous promotion-ended texts qualify.
+  if (Number(status) === 401 && /free promotion has ended|promotion has ended/i.test(text)) {
+    return true;
+  }
 
   // Only HTTP statuses that providers use for model-access/subscription denials
   // are accepted. 401 (auth) and 429 (rate-limit) are NEVER model-access.
@@ -475,6 +622,16 @@ export function applyComboTargetExhaustion(provider, connectionId, model, status
   // 401/403 auth branch, which would wrongly exhaust the whole account.
   if (model && isModelAccessDeniedError(status, errorText)) {
     sets.exhaustedProviders.add(`${provider}:${model}`);
+    // Persist the denial across requests (30 min) — but ONLY for the noAuth
+    // "Public" connection (no `connectionId` field / "noauth"): it has no DB
+    // row to model-lock. EXCEPT status 401: OpenCode's "Free promotion has
+    // ended" is tracked per EGRESS IP, so chatCore rotates the proxy pool and
+    // puts that pool on a 5-minute cooldown instead — caching the model as
+    // dead here would defeat the rotation. Other denial statuses (403/404
+    // model_not_allowed…) are model-wide and safe to cache.
+    if ((connectionId === "noauth" || connectionId == null) && Number(status) !== 401) {
+      noteTargetDenied(`${provider}/${model}`, undefined, typeof errorText === "string" ? errorText.slice(0, 300) : "");
+    }
     log?.info?.("COMBO", `Provider ${provider} model ${model} access denied (${status}) — excluding only this model, connection stays eligible`);
     return false;
   }

@@ -1,6 +1,7 @@
 "use client";
 
 import PropTypes from "prop-types";
+import { useState } from "react";
 
 const MODEL_LOCK_PREFIX = "modelLock_";
 
@@ -14,32 +15,39 @@ function timeAgo(iso) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-/**
- * ConnectionErrorBadge — structured last-error display for a connection key.
- *
- * Shows the HTTP status code, the (truncated) error message with full text on
- * hover, and how long ago it happened. When the connection only has active
- * MODEL-scoped locks (a denied model does not lock the account), the badge is
- * amber to signal "account healthy, specific models cooling down"; genuine
- * account-level errors stay red.
- */
-export default function ConnectionErrorBadge({ connection }) {
-  if (!connection.lastError) return null;
+const RATE_LIMIT_MESSAGE_RE =
+  /rate[ _-]?limit|too many requests|quota exceeded|free usage limit|freeusagelimiterror|free_rate_limited|capacity is limited/i;
 
-  const now = Date.now();
-  const hasActiveModelLock = Object.entries(connection).some(
+export default function ConnectionErrorBadge({ connection }) {
+  const [now] = useState(() => Date.now());
+  if (!connection?.lastError) return null;
+
+  const status = Number(connection?.errorCode);
+  const message =
+    typeof connection.lastError === "string"
+      ? connection.lastError
+      : String(connection.lastError);
+
+  const hasActiveModelLock = Object.entries(connection || {}).some(
     ([k, v]) => k.startsWith(MODEL_LOCK_PREFIX) && v && new Date(v).getTime() > now,
   );
-  // Model-scoped denial: the lock list covers the failure, account itself is fine.
-  const tone = hasActiveModelLock ? "text-amber-500" : "text-red-500";
+
+  // 429 / rate-limit, atau akun yang sudah punya model lock: jangan tampilkan
+  // error berisik di level akun — tag model yang menunjukkan model mana yang abis.
+  if (
+    hasActiveModelLock ||
+    status === 429 ||
+    RATE_LIMIT_MESSAGE_RE.test(message)
+  ) {
+    return null;
+  }
 
   const ago = connection.lastErrorAt ? timeAgo(connection.lastErrorAt) : "";
-  const message = typeof connection.lastError === "string" ? connection.lastError : String(connection.lastError);
 
   return (
     <span
-      className={`inline-flex min-w-0 items-center gap-1 text-xs ${tone}`}
-      title={`${message}${ago ? `\n(${ago})` : ""}${hasActiveModelLock ? "\nAccount-level OK — only specific model(s) in cooldown" : ""}`}
+      className="inline-flex min-w-0 items-center gap-1 text-xs text-red-500"
+      title={`${message}${ago ? `\n(${ago})` : ""}`}
     >
       <span className="material-symbols-outlined text-[13px] shrink-0">error_outline</span>
       {connection.errorCode && (

@@ -419,7 +419,19 @@ export function openaiToOpenAIResponsesRequest(model, body, stream, credentials)
   if (body.max_tokens !== undefined) result.max_tokens = body.max_tokens;
   if (body.top_p !== undefined) result.top_p = body.top_p;
   if (body.reasoning !== undefined) result.reasoning = body.reasoning;
-  if (body.reasoning_effort !== undefined) result.reasoning = { effort: body.reasoning_effort, summary: "auto" };
+  if (body.reasoning_effort !== undefined) {
+    // Responses endpoints validate `reasoning.effort` against a strict enum
+    // (none|minimal|low|medium|high|xhigh|max). Clients like dsh send "auto"
+    // meaning "provider default" — forward only enum-safe values and drop the
+    // rest so the upstream picks its own default instead of 400-ing.
+    const effort = String(body.reasoning_effort).toLowerCase();
+    const ENUM_SAFE = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    if (ENUM_SAFE.includes(effort)) {
+      result.reasoning = { effort, summary: "auto" };
+    } else if (result.reasoning === undefined) {
+      result.reasoning = { summary: "auto" };
+    }
+  }
   if (body.service_tier !== undefined) result.service_tier = body.service_tier;
   if (body.prompt_cache_key !== undefined) result.prompt_cache_key = body.prompt_cache_key;
 

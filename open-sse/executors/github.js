@@ -209,8 +209,9 @@ export class GithubExecutor extends BaseExecutor {
           }
 
           const converted = openaiResponsesToOpenAIResponse(parsed, state);
-          if (converted) {
-            const sseString = formatSSE(converted, "openai");
+          // The translator may return an array (deferred tool-call header + delta).
+          for (const chunk of Array.isArray(converted) ? converted : converted ? [converted] : []) {
+            const sseString = formatSSE(chunk, "openai");
             controller.enqueue(new TextEncoder().encode(sseString));
           }
         }
@@ -220,8 +221,8 @@ export class GithubExecutor extends BaseExecutor {
           const parsed = parseSSELine(buffer.trim());
           if (parsed && !parsed.done) {
             const converted = openaiResponsesToOpenAIResponse(parsed, state);
-            if (converted) {
-              controller.enqueue(new TextEncoder().encode(formatSSE(converted, "openai")));
+            for (const chunk of Array.isArray(converted) ? converted : converted ? [converted] : []) {
+              controller.enqueue(new TextEncoder().encode(formatSSE(chunk, "openai")));
             }
           }
         }

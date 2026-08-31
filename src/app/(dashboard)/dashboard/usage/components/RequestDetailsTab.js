@@ -255,7 +255,7 @@ export default function RequestDetailsTab() {
 
       <Card padding="none">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[880px]">
+          <table className="w-full min-w-[1060px]">
             <thead>
               <tr className="border-b border-black/5 dark:border-white/5">
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Timestamp</th>
@@ -265,6 +265,8 @@ export default function RequestDetailsTab() {
                 <th className="text-right p-4 text-sm font-semibold text-text-main">Cached</th>
                 <th className="text-right p-4 text-sm font-semibold text-text-main">Cache Creation</th>
                 <th className="text-right p-4 text-sm font-semibold text-text-main">Output Tokens</th>
+                <th className="text-left p-4 text-sm font-semibold text-text-main">API Key</th>
+                <th className="text-left p-4 text-sm font-semibold text-text-main">Status</th>
                 <th className="text-left p-4 text-sm font-semibold text-text-main">Latency</th>
                 <th className="text-center p-4 text-sm font-semibold text-text-main">Action</th>
               </tr>
@@ -272,7 +274,7 @@ export default function RequestDetailsTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="11" className="p-8 text-center text-text-muted">
                     <div className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading...
@@ -281,7 +283,7 @@ export default function RequestDetailsTab() {
                 </tr>
               ) : details.length === 0 ? (
                 <tr>
-                  <td colSpan="7" className="p-8 text-center text-text-muted">
+                  <td colSpan="11" className="p-8 text-center text-text-muted">
                     No request details found
                   </td>
                 </tr>
@@ -313,6 +315,24 @@ export default function RequestDetailsTab() {
                     </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
                       {detail.tokens?.completion_tokens?.toLocaleString() || 0}
+                    </td>
+                    <td className="max-w-[160px] p-4">
+                      <div className="truncate font-mono text-xs text-text-main" title={detail.apiKeyMask || detail.connectionId || ""}>
+                        {detail.apiKeyMask || "—"}
+                      </div>
+                      {detail.connectionLabel && (
+                        <div className="truncate text-[11px] text-text-muted" title={detail.connectionLabel}>
+                          {detail.connectionLabel}
+                        </div>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap p-4 text-sm">
+                      <span className={cn(
+                        "font-medium",
+                        detail.status === "success" ? "text-green-600" : "text-red-600"
+                      )}>
+                        {detail.status}
+                      </span>
                     </td>
                     <td className="p-4 text-sm text-text-muted">
                       <div className="flex flex-col gap-0.5">
@@ -373,6 +393,15 @@ export default function RequestDetailsTab() {
               <div>
                 <span className="text-text-muted">Model:</span>{" "}
                 <span className="text-text-main font-mono">{selectedDetail.model}</span>
+              </div>
+              <div>
+                <span className="text-text-muted">API Key:</span>{" "}
+                <span className="break-all font-mono text-text-main">
+                  {selectedDetail.apiKeyMask || "—"}
+                </span>
+                {selectedDetail.connectionLabel && (
+                  <span className="text-text-muted"> ({selectedDetail.connectionLabel})</span>
+                )}
               </div>
               <div>
                 <span className="text-text-muted">Status:</span>{" "}

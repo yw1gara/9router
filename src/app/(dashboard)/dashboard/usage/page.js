@@ -5,6 +5,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "./components/RequestDetailsTab";
 import UsageAnalytics from "./components/Analytics";
+import BreakdownTab from "./components/BreakdownTab";
 
 const PERIODS = [
   { value: "today", label: "Today" },
@@ -29,7 +30,7 @@ function UsageContent() {
   const [period, setPeriod] = useState("today");
 
   const tabFromUrl = searchParams.get("tab");
-  const activeTab = tabFromUrl && ["overview", "logs", "details", "analytics"].includes(tabFromUrl)
+  const activeTab = tabFromUrl && ["overview", "logs", "details", "analytics", "breakdown"].includes(tabFromUrl)
     ? tabFromUrl
     : "overview";
 
@@ -49,12 +50,14 @@ function UsageContent() {
             { value: "overview", label: "Overview" },
             { value: "analytics", label: "Analytics" },
             { value: "details", label: "Details" },
+            { value: "breakdown", label: "Breakdown" },
+            { value: "logs", label: "Logs" },
           ]}
           value={activeTab}
           onChange={handleTabChange}
           className="w-full sm:w-auto"
         />
-        {(activeTab === "overview" || activeTab === "analytics") && (
+        {(activeTab === "overview" || activeTab === "analytics" || activeTab === "breakdown") && (
           <SegmentedControl
             options={PERIODS}
             value={period}
@@ -75,6 +78,7 @@ function UsageContent() {
           <UsageAnalytics period={period} />
         </Suspense>
       )}
+      {activeTab === "breakdown" && <BreakdownTab period={period} />}
       {activeTab === "logs" && <RequestLogger />}
       {activeTab === "details" && <RequestDetailsTab />}
     </div>

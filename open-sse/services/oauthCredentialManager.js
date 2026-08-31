@@ -131,6 +131,19 @@ function getRefreshLockKey(provider, credentials) {
   return `${provider}:${stableId}`;
 }
 
+// Latest persisted credentials, re-shaped for the caller's consumption. Used by
+// the re-check paths under the refresh lock — never refresh with a stale snapshot.
+function pickUsableCredentials(latest) {
+  return {
+    accessToken: latest.accessToken,
+    apiKey: latest.apiKey,
+    refreshToken: latest.refreshToken,
+    copilotToken: latest.copilotToken ?? latest.providerSpecificData?.copilotToken,
+    expiresAt: latest.expiresAt,
+    lastRefreshAt: latest.lastRefreshAt ?? latest.providerSpecificData?.lastRefreshAt,
+  };
+}
+
 export async function withCredentialRefreshLock(provider, credentials, refreshFn, getCurrentCredentials, isRefreshStillNeeded) {
   const key = getRefreshLockKey(provider, credentials);
   const existing = refreshLocks.get(key);
@@ -147,18 +160,25 @@ export async function withCredentialRefreshLock(provider, credentials, refreshFn
       if (getCurrentCredentials) {
         try {
           const latest = await getCurrentCredentials();
+          // Stale-snapshot race: the persisted refresh_token differs from the
+          // one this caller captured, so another refresh already rotated it.
+          // Refreshing with the old (now consumed) token would return
+          // invalid_grant and can revoke the whole token family. Reuse the
+          // latest persisted credentials instead — even for forced callers.
+          const tokenRotated =
+            latest &&
+            credentials?.refreshToken &&
+            latest.refreshToken &&
+            latest.refreshToken !== credentials.refreshToken;
+          if (tokenRotated) {
+            const pick = pickUsableCredentials(latest);
+            if (pick.refreshToken) return pick;
+          }
           const stillNeeded = isRefreshStillNeeded
             ? isRefreshStillNeeded(latest)
             : shouldRefreshCredentials(provider, latest);
           if (latest && !stillNeeded) {
-            const pick = {
-              accessToken: latest.accessToken,
-              apiKey: latest.apiKey,
-              refreshToken: latest.refreshToken,
-              copilotToken: latest.copilotToken ?? latest.providerSpecificData?.copilotToken,
-              expiresAt: latest.expiresAt,
-              lastRefreshAt: latest.lastRefreshAt ?? latest.providerSpecificData?.lastRefreshAt,
-            };
+            const pick = pickUsableCredentials(latest);
             if (pick.accessToken || pick.apiKey || pick.copilotToken || pick.refreshToken) {
               return pick;
             }

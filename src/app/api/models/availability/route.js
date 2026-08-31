@@ -7,6 +7,9 @@ import {
 } from "@/lib/localDb";
 
 const MODEL_LOCK_PREFIX = "modelLock_";
+// Accumulation state companion field (modelLockAcc_<model>) — cleared together
+// with its lock so a manually cleared cooldown restarts from count 1.
+const MODEL_LOCK_ACC_PREFIX = "modelLockAcc_";
 
 function getActiveModelLocks(connection) {
   const now = Date.now();
@@ -51,7 +54,10 @@ export async function GET() {
         });
       }
 
-      if (locks.length === 0 && connection.testStatus === "unavailable") {
+      // Only expose account-wide unavailable when no model locks remain and
+      // an explicit account lock exists. A stale testStatus from an expired
+      // model cooldown must not make account appear permanently dead.
+      if (locks.length === 0 && connection.testStatus === "unavailable" && new Date(connection[`${MODEL_LOCK_PREFIX}__all`]).getTime() > Date.now()) {
         models.push({
           provider: providerLabel,
           providerId: connection.provider,
@@ -80,8 +86,19 @@ export async function GET() {
             const v = fresh?.[key];
             return v && new Date(v).getTime() <= Date.now();
           });
-          if (stillExpired.length > 0) {
-            await updateProviderConnection(connection.id, Object.fromEntries(stillExpired.map((key) => [key, null])));
+          // Also purge accumulation state whose grace window (lock expiry +
+          // its own duration) has fully elapsed — pure DB hygiene.
+          const staleAcc = Object.keys(fresh || {})
+            .filter((key) => {
+              if (!key.startsWith(MODEL_LOCK_ACC_PREFIX)) return false;
+              const acc = fresh[key];
+              if (!acc || !Number.isFinite(acc.ms)) return true;
+              const until = new Date(acc.until).getTime();
+              return (Number.isNaN(until) ? 0 : until) + acc.ms <= Date.now();
+            });
+          const purge = [...stillExpired.map((key) => [key, null]), ...staleAcc.map((key) => [key, null])];
+          if (purge.length > 0) {
+            await updateProviderConnection(connection.id, Object.fromEntries(purge));
           }
         } catch { /* purge is best-effort */ }
       }
@@ -125,6 +142,7 @@ export async function POST(request) {
       }
     }
     const lockKey = `${MODEL_LOCK_PREFIX}${model}`;
+    const accKey = `${MODEL_LOCK_ACC_PREFIX}${model}`;
 
     await Promise.all(
       connections
@@ -132,6 +150,7 @@ export async function POST(request) {
         .map((connection) =>
           updateProviderConnection(connection.id, {
             [lockKey]: null,
+            [accKey]: null,
             ...(connection.testStatus === "unavailable"
               ? {
                   testStatus: "active",

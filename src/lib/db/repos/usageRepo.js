@@ -24,6 +24,8 @@ if (!global._statsEmitter) {
 if (!global._pendingTimers) global._pendingTimers = {};
 if (!global._recentRing) global._recentRing = { items: [], initialized: false };
 if (!global._connectionMapCache) global._connectionMapCache = { map: {}, ts: 0 };
+if (!global._providerNodeNameMapCache) global._providerNodeNameMapCache = { map: {}, ts: 0 };
+if (!global._apiKeyMapCache) global._apiKeyMapCache = { map: {}, ts: 0 };
 if (!global._statsEmitTimers) global._statsEmitTimers = { pending: null, update: null };
 
 const pendingRequests = global._pendingRequests;
@@ -31,6 +33,8 @@ const lastErrorProvider = global._lastErrorProvider;
 const pendingTimers = global._pendingTimers;
 const recentRing = global._recentRing;
 const connCache = global._connectionMapCache;
+const nodeNameCache = global._providerNodeNameMapCache;
+const apiKeyCache = global._apiKeyMapCache;
 const statsEmitTimers = global._statsEmitTimers;
 
 export const statsEmitter = global._statsEmitter;
@@ -115,6 +119,32 @@ async function getConnectionMapCached() {
     connCache.ts = Date.now();
   } catch {}
   return connCache.map;
+}
+
+async function getApiKeyNameMapCached() {
+  if (Date.now() - apiKeyCache.ts < CONN_CACHE_TTL_MS) return apiKeyCache.map;
+  try {
+    const { getApiKeys } = await import("./apiKeysRepo.js");
+    const all = await getApiKeys();
+    const map = {};
+    for (const k of all) map[k.key] = k.name || `Key ${k.id?.slice(0, 6) || "??"}`;
+    apiKeyCache.map = map;
+    apiKeyCache.ts = Date.now();
+  } catch {}
+  return apiKeyCache.map;
+}
+
+async function getProviderNodeNameMapCached() {
+  if (Date.now() - nodeNameCache.ts < CONN_CACHE_TTL_MS) return nodeNameCache.map;
+  try {
+    const { getProviderNodes } = await import("./nodesRepo.js");
+    const all = await getProviderNodes();
+    const map = {};
+    for (const n of all) if (n.id && n.name) map[n.id] = n.name;
+    nodeNameCache.map = map;
+    nodeNameCache.ts = Date.now();
+  } catch {}
+  return nodeNameCache.map;
 }
 
 async function ensureRingInitialized() {
@@ -240,16 +270,23 @@ export async function getActiveRequests() {
   }
 
   await ensureRingInitialized();
+  const apiKeyNames = await getApiKeyNameMapCached();
+  const providerNodeNames = await getProviderNodeNameMapCached();
   const seen = new Set();
   const recentRequests = [...recentRing.items]
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
     .map((e) => {
       const t = e.tokens || {};
+      const keyName = e.apiKey
+        ? (apiKeyNames[e.apiKey] || `${String(e.apiKey).slice(0, 8)}…`)
+        : "Local";
       return {
-        timestamp: e.timestamp, model: e.model, provider: e.provider || "",
+        timestamp: e.timestamp, model: e.model,
+        provider: providerNodeNames[e.provider] || e.provider || "",
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         status: e.status || "ok",
+        keyName,
       };
     })
     .filter((e) => {
@@ -282,7 +319,7 @@ export async function getActiveRequests() {
   }
 
   const errorProvider = (Date.now() - lastErrorProvider.ts < 10000) ? lastErrorProvider.provider : "";
-  return { activeRequests, activeApiKeys, recentRequests, errorProvider };
+  return { activeRequests, activeApiKeys, recentRequests, errorProvider, pending: pendingRequests };
 }
 
 export async function saveRequestUsage(entry) {
@@ -416,17 +453,22 @@ export async function getUsageStats(period = "all") {
   for (const k of allApiKeys) apiKeyMap[k.key] = { name: k.name, id: k.id, createdAt: k.createdAt };
 
   // recentRequests from live history (last 100 entries enough for 20 deduped)
-  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status FROM usageHistory ORDER BY id DESC LIMIT 100`);
+  const recentRows = db.all(`SELECT timestamp, provider, model, tokens, status, apiKey FROM usageHistory ORDER BY id DESC LIMIT 100`);
   const seen = new Set();
   const recentRequests = recentRows
     .map((r) => {
       const t = parseJson(r.tokens, {}) || {};
+      const keyName = r.apiKey
+        ? (apiKeyMap[r.apiKey]?.name || `${String(r.apiKey).slice(0, 8)}…`)
+        : "Local";
       return {
-        timestamp: r.timestamp, model: r.model, provider: r.provider || "",
+        timestamp: r.timestamp, model: r.model,
+        provider: providerNodeNameMap[r.provider] || r.provider || "",
         promptTokens: t.prompt_tokens || t.input_tokens || 0,
         completionTokens: t.completion_tokens || t.output_tokens || 0,
         cachedTokens: t.cached_tokens || t.cache_read_input_tokens || 0,
         status: r.status || "ok",
+        keyName,
       };
     })
     .filter((e) => {
@@ -524,7 +566,7 @@ export async function getUsageStats(period = "all") {
         const statsKey = provider ? `${rawModel} (${provider})` : rawModel;
         const providerDisplayName = providerNodeNameMap[provider] || provider;
         if (!stats.byModel[statsKey]) {
-          stats.byModel[statsKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, lastUsed: dateKey };
+          stats.byModel[statsKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, providerId: provider, lastUsed: dateKey };
         }
         stats.byModel[statsKey].requests += m.requests || 0;
         stats.byModel[statsKey].promptTokens += m.promptTokens || 0;
@@ -541,7 +583,7 @@ export async function getUsageStats(period = "all") {
         const providerDisplayName = providerNodeNameMap[provider] || provider;
         const accountKey = `${rawModel} (${provider} - ${accountName})`;
         if (!stats.byAccount[accountKey]) {
-          stats.byAccount[accountKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, connectionId: connId, accountName, lastUsed: dateKey };
+          stats.byAccount[accountKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel, provider: providerDisplayName, providerId: provider, connectionId: connId, accountName, lastUsed: dateKey };
         }
         stats.byAccount[accountKey].requests += a.requests || 0;
         stats.byAccount[accountKey].promptTokens += a.promptTokens || 0;
@@ -630,10 +672,12 @@ export async function getUsageStats(period = "all") {
     );
 
     for (const r of filtered) {
-      const tokens = parseJson(r.tokens, {}) || {};
-      const promptTokens = tokens.prompt_tokens || 0;
-      const completionTokens = tokens.completion_tokens || 0;
-      const cachedTokens = tokens.cached_tokens || tokens.cache_read_input_tokens || 0;
+      // Prefer the normalized columns (written at insert) — the raw tokens JSON
+      // may use provider-specific keys (input_tokens vs prompt_tokens).
+      const tokensJson = parseJson(r.tokens, {}) || {};
+      const promptTokens = r.promptTokens ?? tokensJson.prompt_tokens ?? tokensJson.input_tokens ?? 0;
+      const completionTokens = r.completionTokens ?? tokensJson.completion_tokens ?? tokensJson.output_tokens ?? 0;
+      const cachedTokens = tokensJson.cached_tokens ?? tokensJson.cache_read_input_tokens ?? 0;
       const entryCost = r.cost || 0;
       const providerDisplayName = providerNodeNameMap[r.provider] || r.provider;
 
@@ -643,16 +687,19 @@ export async function getUsageStats(period = "all") {
       stats.totalCost += entryCost;
       stats.totalRequests += 1;
 
-      if (!stats.byProvider[r.provider]) stats.byProvider[r.provider] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
-      stats.byProvider[r.provider].requests++;
-      stats.byProvider[r.provider].promptTokens += promptTokens;
-      stats.byProvider[r.provider].completionTokens += completionTokens;
-      stats.byProvider[r.provider].cachedTokens += cachedTokens;
-      stats.byProvider[r.provider].cost += entryCost;
+      // Key by display name (same as the daily-summary path) so custom
+      // providers keep one stable label across all periods.
+      const provKey = providerDisplayName;
+      if (!stats.byProvider[provKey]) stats.byProvider[provKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
+      stats.byProvider[provKey].requests++;
+      stats.byProvider[provKey].promptTokens += promptTokens;
+      stats.byProvider[provKey].completionTokens += completionTokens;
+      stats.byProvider[provKey].cachedTokens += cachedTokens;
+      stats.byProvider[provKey].cost += entryCost;
 
       const modelKey = r.provider ? `${r.model} (${r.provider})` : r.model;
       if (!stats.byModel[modelKey]) {
-        stats.byModel[modelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, lastUsed: r.timestamp };
+        stats.byModel[modelKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, providerId: r.provider, lastUsed: r.timestamp };
       }
       stats.byModel[modelKey].requests++;
       stats.byModel[modelKey].promptTokens += promptTokens;
@@ -665,7 +712,7 @@ export async function getUsageStats(period = "all") {
         const accountName = connectionMap[r.connectionId] || `Account ${r.connectionId.slice(0, 8)}...`;
         const accountKey = `${r.model} (${r.provider} - ${accountName})`;
         if (!stats.byAccount[accountKey]) {
-          stats.byAccount[accountKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, connectionId: r.connectionId, accountName, lastUsed: r.timestamp };
+          stats.byAccount[accountKey] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, rawModel: r.model, provider: providerDisplayName, providerId: r.provider, connectionId: r.connectionId, accountName, lastUsed: r.timestamp };
         }
         stats.byAccount[accountKey].requests++;
         stats.byAccount[accountKey].promptTokens += promptTokens;

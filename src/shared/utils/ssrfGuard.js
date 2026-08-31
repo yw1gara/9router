@@ -51,6 +51,9 @@ function isBlockedIpv6(host) {
 // Throw if URL targets a non-public host. Caller should map to 400.
 export function assertPublicUrl(rawUrl) {
   const parsed = new URL(rawUrl);
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error("Blocked URL: protocol must be http or https");
+  }
   const host = parsed.hostname.toLowerCase();
 
   if (BLOCKED_HOSTNAMES.has(host)) throw new Error("Blocked URL: internal host");

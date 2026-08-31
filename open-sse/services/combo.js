@@ -2,11 +2,30 @@
  * Shared combo (model combo) handling with fallback support
  */
 
-import { checkFallbackError, formatRetryAfter } from "./accountFallback.js";
+import { checkFallbackError, formatRetryAfter, isTargetDenied } from "./accountFallback.js";
+import { resolveProviderId } from "../../src/shared/constants/providers.js";
+
+/**
+ * Normalize a combo target's provider prefix to its canonical provider id so
+ * denial marks (keyed `provider/model` post-resolution) also match targets
+ * stored under an alias (e.g. `oc/...` vs `opencode/...`).
+ */
+function normalizeDeniedKey(target) {
+  const sep = String(target || "").indexOf("/");
+  if (sep <= 0) return target;
+  return `${resolveProviderId(target.slice(0, sep))}/${target.slice(sep + 1)}`;
+}
+
+function isTargetDeniedAliasAware(target) {
+  return isTargetDenied(target) || isTargetDenied(normalizeDeniedKey(target));
+}
 import { unavailableResponse } from "../utils/error.js";
 import { getCapabilitiesForModel } from "../providers/capabilities.js";
 import { extractTextContent } from "../translator/formats/gemini.js";
-import { DEFAULT_COMBO_TARGET_TIMEOUT_MS } from "../config/runtimeConfig.js";
+import {
+  DEFAULT_COMBO_TARGET_TIMEOUT_MS,
+  COMBO_TRANSIENT_WAIT_MS,
+} from "../config/runtimeConfig.js";
 
 // Hard capabilities = input modalities; missing one drops request data (e.g. image
 // stripped). Must be prioritized. Soft (e.g. search) only degrades a feature.
@@ -87,6 +106,96 @@ export function reorderByCapabilities(models, required) {
  * @type {Map<string, { index: number, consecutiveUseCount: number }>}
  */
 const comboRotationState = new Map();
+
+/**
+ * Short-term health memory for combo targets: models that just failed
+ * (timeout / 5xx / fallback error) are demoted to the back of the combo for
+ * the next requests, so switching away from a degraded target is immediate
+ * instead of retrying it first on every request. Entries expire after a TTL;
+ * a success clears the entry so recovered targets re-enter the front.
+ * In-memory only — restart resets it (fine: DB model-locks cover persistence).
+ * @type {Map<string, number>} key `${comboName}|${model}` -> expiry epoch ms
+ */
+const TARGET_FAILURE_TTL_MS = 60 * 1000;
+const TARGET_FAILURE_MAP_MAX = 500;
+const recentTargetFailures = new Map();
+
+function targetFailureKey(comboName, model) {
+  return `${comboName || ""}|${model}`;
+}
+
+export function noteTargetFailure(comboName, model, ttlMs = TARGET_FAILURE_TTL_MS) {
+  if (!model) return;
+  const now = Date.now();
+  // Lazy eviction + hard cap so the map can't grow unbounded.
+  if (recentTargetFailures.size >= TARGET_FAILURE_MAP_MAX) {
+    for (const [k, exp] of recentTargetFailures) {
+      if (exp <= now) recentTargetFailures.delete(k);
+    }
+    if (recentTargetFailures.size >= TARGET_FAILURE_MAP_MAX) {
+      const oldest = recentTargetFailures.keys().next().value;
+      if (oldest !== undefined) recentTargetFailures.delete(oldest);
+    }
+  }
+  recentTargetFailures.set(targetFailureKey(comboName, model), now + ttlMs);
+}
+
+export function clearTargetFailure(comboName, model) {
+  if (!model) return;
+  recentTargetFailures.delete(targetFailureKey(comboName, model));
+}
+
+/**
+ * Reset the short-term target-failure memory (tests / combo-settings resets).
+ * @param {string} [comboName] - Combo to clear; omit to clear everything.
+ */
+export function resetTargetFailureTracking(comboName) {
+  if (!comboName) {
+    recentTargetFailures.clear();
+    return;
+  }
+  const prefix = `${comboName}|`;
+  for (const key of recentTargetFailures.keys()) {
+    if (key.startsWith(prefix)) recentTargetFailures.delete(key);
+  }
+}
+
+function isTargetRecentlyFailed(comboName, model) {
+  // Two key layers: a combo-scoped mark (`${comboName}|${model}`) from an
+  // in-combo failure, and a GLOBAL mark (`|${model}`) recorded by layers that
+  // don't know the combo context (e.g. the degenerate-output guard in the
+  // stream, keyed as `${provider}/${model}`). A global mark demotes the
+  // target in every combo that lists it.
+  const keys = comboName ? [`${comboName}|${model}`, `|${model}`] : [`|${model}`];
+  const now = Date.now();
+  for (const key of keys) {
+    const exp = recentTargetFailures.get(key);
+    if (!exp) continue;
+    if (exp <= now) {
+      recentTargetFailures.delete(key);
+      continue;
+    }
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Stable-partition recently-failed targets to the back of the list. Only
+ * demotes when at least one healthy target exists, so an all-degraded combo
+ * keeps its configured order.
+ */
+function demoteRecentlyFailedTargets(models, comboName, log) {
+  if (!Array.isArray(models) || models.length <= 1) return models;
+  const healthy = [];
+  const degraded = [];
+  for (const m of models) {
+    (isTargetRecentlyFailed(comboName, m) ? degraded : healthy).push(m);
+  }
+  if (degraded.length === 0 || healthy.length === 0) return models;
+  log?.info?.("COMBO", `switch-fast: demoting recently-failed target(s) to back → ${degraded.join(", ")}`);
+  return [...healthy, ...degraded];
+}
 
 // Trailing run of items after the last assistant/model turn = the current user
 // turn. It may span several messages (e.g. text + image split across blocks),
@@ -274,19 +383,26 @@ function combineSignals(...signals) {
   if (sources.length === 1) return sources[0];
 
   const controller = new AbortController();
-  const onAbort = () => controller.abort();
+  // Forward the abort REASON so downstream handlers can distinguish a combo
+  // per-model timeout (and read its duration) from a plain client disconnect.
+  const onAbort = (evt) => {
+    const reason = evt?.target?.reason;
+    controller.abort(reason !== undefined ? reason : undefined);
+  };
   let aborted = false;
+  let firstReason;
 
   for (const sig of sources) {
     if (sig.aborted) {
       aborted = true;
+      firstReason = sig.reason;
       break;
     }
     sig.addEventListener("abort", onAbort, { once: true });
   }
 
   if (aborted) {
-    controller.abort();
+    controller.abort(firstReason !== undefined ? firstReason : undefined);
   }
 
   return controller.signal;
@@ -321,15 +437,32 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       rotatedModels = reordered;
     }
   }
-  
+
+  // Switch-fast: push targets that recently timed out / errored to the back
+  // so the combo starts from a healthy model instead of re-burning degraded
+  // ones on every request (entries auto-expire; successes clear them).
+  rotatedModels = demoteRecentlyFailedTargets(rotatedModels, comboName, log);
+
+  // Dead models: a denied target (e.g. OpenCode "Free promotion has ended")
+  // is dead from every IP/account — skip it entirely for 30 min instead of
+  // failing every request on it. If EVERYTHING is denied, keep the original
+  // order (cheap re-probe) so the combo never returns without trying.
+  if (rotatedModels.length > 1) {
+    const alive = rotatedModels.filter((m) => !isTargetDeniedAliasAware(m));
+    if (alive.length > 0 && alive.length < rotatedModels.length) {
+      const skipped = rotatedModels.filter((m) => isTargetDeniedAliasAware(m));
+      log?.info?.("COMBO", `skipping denied (promotion ended / no access) target(s): ${skipped.join(", ")}`);
+      rotatedModels = alive;
+    }
+  }
+
   let lastError = null;
   let earliestRetryAfter = null;
-  let lastStatus = null;
 
   for (let i = 0; i < rotatedModels.length; i++) {
     const modelStr = rotatedModels[i];
 
-    // Honor external abort before trying the next target.
+    // A caller abort means no consumer remains for a fallback response.
     if (signal?.aborted) {
       log.info("COMBO", "External signal aborted — stopping combo fallback");
       return new Response(
@@ -358,7 +491,8 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
           timeoutId = setTimeout(() => {
             timedOut = true;
             log.warn("COMBO", `Model ${modelStr} exceeded ${timeoutMs}ms timeout — falling back`);
-            timeoutController.abort(new Error("combo-per-model-timeout"));
+            noteTargetFailure(comboName, modelStr);
+            timeoutController.abort(new Error(`combo-per-model-timeout:${timeoutMs}`));
             resolve(
               new Response(
                 JSON.stringify({ error: { message: `Model ${modelStr} timed out` } }),
@@ -389,6 +523,7 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       // Success (2xx) - return response
       if (result.ok) {
         log.info("COMBO", `Model ${modelStr} succeeded`);
+        clearTargetFailure(comboName, modelStr);
         return result;
       }
 
@@ -414,17 +549,21 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
       }
 
       // Check if should fallback to next model
-      const { shouldFallback, cooldownMs } = checkFallbackError(result.status, errorText);
+      const fallbackDecision = checkFallbackError(result.status, errorText);
+      // A target-level 400 can mean model-specific schema/access incompatibility.
+      // Local request validation happens before combo expansion and remains 400.
+      const shouldFallback = result.status === 400 || fallbackDecision.shouldFallback;
+      const cooldownMs = fallbackDecision.cooldownMs;
 
       if (!shouldFallback) {
         log.warn("COMBO", `Model ${modelStr} failed (no fallback)`, { status: result.status });
         return result;
       }
 
-      // For transient errors (503/502/504), wait for cooldown before falling through
-      // so a briefly-overloaded provider gets a chance to recover rather than being
-      // skipped immediately (fixes: combo falls through on transient 503)
-      if (cooldownMs && cooldownMs > 0 && cooldownMs <= 5000 &&
+      // For transient errors (503/502/504), optionally wait for cooldown before
+      // falling through so a briefly-overloaded provider gets a chance to recover.
+      // Disabled by default (COMBO_TRANSIENT_WAIT_MS=0) to keep combo latency low.
+      if (cooldownMs && cooldownMs > 0 && cooldownMs <= COMBO_TRANSIENT_WAIT_MS &&
           (result.status === 503 || result.status === 502 || result.status === 504)) {
         log.info("COMBO", `Model ${modelStr} transient ${result.status}, waiting ${cooldownMs}ms before next`);
         await new Promise(r => setTimeout(r, cooldownMs));
@@ -432,22 +571,25 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
 
       // Fallback to next model
       lastError = errorText || String(result.status);
-      if (!lastStatus) lastStatus = result.status;
+      noteTargetFailure(comboName, modelStr);
       log.warn("COMBO", `Model ${modelStr} failed, trying next`, { status: result.status });
     } catch (error) {
       // Catch unexpected exceptions to ensure fallback continues
       lastError = error.message || String(error);
-      if (!lastStatus) lastStatus = 500;
+      noteTargetFailure(comboName, modelStr);
       log.warn("COMBO", `Model ${modelStr} threw error, trying next`, { error: lastError });
     }
   }
 
   // All models failed
-  // Use 503 (Service Unavailable) rather than 406 (Not Acceptable) — 406 implies
-  // the request itself is invalid, but here the providers are simply unavailable
-  // or have no active credentials. 503 is more accurate and retryable by clients.
-  const allDisabled = lastError && lastError.toLowerCase().includes("no credentials");
-  const status = allDisabled ? 503 : (lastStatus || 503);
+  // ALWAYS 503 (Service Unavailable): every fallback-eligible target was tried
+  // and failed, so the aggregate condition is "temporarily unavailable, retry
+  // later" — never the incidental status of the FIRST failing target. Leaking
+  // that status (e.g. 403 key_paused, 404, 502) makes clients classify the
+  // failure as permanent/non-retryable (harness: auth_failed retryable=false)
+  // even though a retry would route to a healthy target. Client-side errors
+  // (400/413/414/422/431) never reach here — they return early per-target.
+  const status = 503;
   const msg = lastError || "All combo models unavailable";
 
   if (earliestRetryAfter) {

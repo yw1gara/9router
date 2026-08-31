@@ -29,7 +29,10 @@ import {
   getProviderShortestCooldownMs,
   isProviderExhaustedReason,
   applyComboTargetExhaustion,
+  buildModelLockUpdate,
+  getTargetDenial,
 } from "open-sse/services/accountFallback.js";
+import { updateProviderConnection } from "@/lib/localDb";
 import { maybeWaitForCooldown, MAX_COOLDOWN_RETRIES } from "open-sse/utils/cooldownRetry.js";
 import {
   acquire as acquireAccountSemaphore,
@@ -38,6 +41,11 @@ import {
   resolveAccountSemaphoreKey,
   resolveAccountSemaphoreMaxConcurrency,
 } from "open-sse/services/accountSemaphore.js";
+
+// Log-spam guard state for the denied-model fast path (one line per model
+// per minute, however fast the client retries).
+let deniedLogAt = 0;
+let deniedLogKey = "";
 
 /**
  * Handle chat completion request
@@ -118,7 +126,8 @@ export async function handleChat(request, clientRawRequest = null) {
     const exhaustionSets = {
       exhaustedProviders: new Set(),
       exhaustedConnections: new Set(),
-      transientRateLimitedProviders: new Set()
+      transientRateLimitedProviders: new Set(),
+      providerFailureCounts: new Map()
     };
 
     if (comboStrategy === "fusion") {
@@ -167,7 +176,8 @@ export async function handleChat(request, clientRawRequest = null) {
     const exhaustionSets = {
       exhaustedProviders: new Set(),
       exhaustedConnections: new Set(),
-      transientRateLimitedProviders: new Set()
+      transientRateLimitedProviders: new Set(),
+      providerFailureCounts: new Map()
     };
     log.info("CHAT", `Capacity adapter for [${[...requiredCapabilities].join(",")}] on "${modelStr}" → trying ${soloAugmented.join(", ")}`);
     return handleComboChat({
@@ -230,6 +240,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
       const comboStickyLimit = chatSettings.comboStickyRoundRobinLimit;
       log.info("CHAT", `Combo "${modelStr}" with ${augmentedModels.length} models (strategy: ${comboStrategy}, sticky: ${comboStickyLimit})`);
+      // Carry the outer combo's abort signal (client disconnect + parent
+      // per-target timeout) into this nested combo. Without it a parent timeout
+      // never reaches the nested fallback loop, so the nested leg keeps burning
+      // accounts/upstream calls after the parent already gave up on it.
+      const nestedSignal = externalSignal
+        ? (request?.signal ? AbortSignal.any([request.signal, externalSignal]) : externalSignal)
+        : (request?.signal ?? null);
       return handleComboChat({
         body,
         models: augmentedModels,
@@ -241,7 +258,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         comboName: modelStr,
         comboStrategy,
         comboStickyLimit,
-        signal: request?.signal ?? null,
+        signal: nestedSignal,
         timeoutMs: comboStrategies[modelStr]?.targetTimeoutMs
       });
     }
@@ -250,6 +267,37 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   }
 
   const { provider, model } = modelInfo;
+
+  // Denied-model fast path (noAuth "Public" providers): a model whose
+  // promotion/subscription ended is dead from every IP and account — the
+  // denial is cached for 30 min after the first failure. Serve the cached
+  // error instantly instead of burning a proxied upstream call per request.
+  {
+    const denial = getTargetDenial(`${provider}/${model}`);
+    if (denial) {
+      // Log-spam guard: some clients retry a denied model multiple times per
+      // second; log once per model per minute instead of per request.
+      const key = `${provider}/${model}`;
+      const now = Date.now();
+      if (!deniedLogAt || now - deniedLogAt > 60_000 || deniedLogKey !== key) {
+        deniedLogAt = now;
+        deniedLogKey = key;
+        log.info("CHAT", `[${key}] denied (cached) — skipping upstream call${denial.reason ? `: ${denial.reason.slice(0, 120)}` : ""}`);
+      }
+      const retryAfterSec = Math.max(1, Math.ceil((denial.until - now) / 1000));
+      return new Response(
+        JSON.stringify({ error: { message: denial.reason || `[${key}] model currently denied (e.g. free promotion ended); retry later`, type: "authentication_error", code: "model_denied" } }),
+        {
+          status: HTTP_STATUS.UNAUTHORIZED,
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+            "Retry-After": String(retryAfterSec),
+          },
+        }
+      );
+    }
+  }
 
   // Routing shown in the unified "▶" line (client model → provider/model)
 
@@ -261,8 +309,13 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   const sets = exhaustionSets || {
     exhaustedProviders: new Set(),
     exhaustedConnections: new Set(),
-    transientRateLimitedProviders: new Set()
+    transientRateLimitedProviders: new Set(),
+    // Bound account walking per provider within one combo request.
+    providerFailureCounts: new Map()
   };
+  // Backward-compatible for callers that pass older exhaustion set shapes.
+  sets.providerFailureCounts ??= new Map();
+  const MAX_PROVIDER_ACCOUNT_FAILURES = 3;
 
   // Combine the client-request signal and the combo's per-target timeout
   // signal so both abort the fallback loop and release the semaphore.
@@ -308,19 +361,32 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
       return new Response(null, { status: 499 });
     }
 
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
+    // Pin to a specific account when the caller asks for it (model testing
+    // per-account uses this header; absent for normal traffic).
+    const pinnedConnectionId = request?.headers?.get("x-connection-id") || null;
+    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, pinnedConnectionId ? { preferredConnectionId: pinnedConnectionId } : undefined);
 
     // Skip connections already exhausted in this request (e.g. a previous
     // combo leg got an auth/connection error on the same connection).
     if (credentials && !credentials.allRateLimited &&
         sets.exhaustedConnections.has(`${provider}:${credentials.connectionId}`)) {
+      // Progress guard: if the credential picker returned a connection that is
+      // ALREADY excluded, it ignores exclusions (e.g. a pinned/virtual path).
+      // Continuing would spin this loop forever on the same credentials and
+      // starve the event loop — fail over to the next combo target instead.
+      if (excludeConnectionIds.has(credentials.connectionId)) {
+        log.warn("CHAT", `[${provider}/${model}] credential picker ignored exclusion for ${credentials.connectionId?.slice(0, 8)} — stopping fallback loop`);
+        return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || `[${provider}/${model}] Connection exhausted this request`);
+      }
       excludeConnectionIds.add(credentials.connectionId);
       log.info("CHAT", `[${provider}/${model}] connection ${credentials.connectionId?.slice(0, 8)} already exhausted this request — skipping`);
       continue;
     }
 
-    // All accounts unavailable
+    // All accounts unavailable. Mark this provider/model exhausted so a combo
+    // immediately continues with its next target instead of revisiting it.
     if (!credentials || credentials.allRateLimited) {
+      sets.exhaustedProviders.add(`${provider}:${model}`);
       if (credentials?.allRateLimited) {
         // Provider-exhaustion detection: when the last error signals provider-wide
         // quota/credit exhaustion, waiting for a cooldown is pointless — skip the
@@ -465,6 +531,28 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // account unavailable — the failure was local, not the provider's fault.
     if (externalSignal?.aborted || request?.signal?.aborted) {
       semaphoreRelease();
+      // Combo per-model timeout: the abort reason carries the timeout duration
+      // (set in combo.js as "combo-per-model-timeout:<ms>"). Lock ONLY this
+      // model on THIS key for that duration so the same account stops burning
+      // the full 12s on a model that just hung, while sibling models stay usable.
+      if (!request?.signal?.aborted && externalSignal?.aborted) {
+        const reason = externalSignal.reason;
+        const match = typeof reason?.message === "string" ? reason.message.match(/^combo-per-model-timeout(?::(\d+))?$/) : null;
+        if (match) {
+          const lockMs = Math.max(1000, Math.min(Number(match[1]) || 30_000, 10 * 60 * 1000));
+          // noAuth "Public" has no DB connection row — nothing to lock; the
+          // in-memory denied/target-failure tracking in combo.js covers it.
+          if (credentials.connectionId && credentials.connectionId !== "noauth") {
+            await updateProviderConnection(credentials.connectionId, {
+              ...buildModelLockUpdate(model, lockMs),
+              lastError: `combo target timeout (${match[1] ? `${match[1]}ms` : "target timeout"})`,
+              errorCode: 524,
+              lastErrorAt: new Date().toISOString(),
+            });
+            log.warn("AUTH", `${credentials.connectionName} locked modelLock_${model} for ${Math.round(lockMs / 1000)}s [timeout]`);
+          }
+        }
+      }
       log.info("CHAT", `[${provider}/${model}] aborted after upstream attempt — not marking account`);
       return new Response(null, { status: 499 });
     }
@@ -477,9 +565,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // they are consumed below after the semaphore is released.
     let shouldFallback;
     let cooldownMs;
+    let semaphoreCooldownMs;
     try {
       // Mark account unavailable (auto-calculates cooldown with exponential backoff, or precise resetsAtMs)
-      ({ shouldFallback, cooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs));
+      ({ shouldFallback, cooldownMs, semaphoreCooldownMs } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, result.resetsAtMs));
 
       // Record provider-level failure for the circuit breaker (5xx/timeout only;
       // 429 stays per-account). Deduplicated per connection within 5s.
@@ -487,9 +576,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
 
       // Block the account's semaphore gate on 429 so requests already queued for
       // this account do not hit it again before the DB cooldown is read back.
-      if (semaphoreKey && Number(result.status) === 429 && cooldownMs > 0) {
-        markAccountSemaphoreBlocked(semaphoreKey, cooldownMs);
-        log.info("SEMAPHORE", `Account ${credentials.connectionName} gate blocked for ${Math.round(cooldownMs / 1000)}s [429]`);
+      const gateBlockMs = semaphoreCooldownMs ?? cooldownMs;
+      if (semaphoreKey && Number(result.status) === 429 && gateBlockMs > 0) {
+        markAccountSemaphoreBlocked(semaphoreKey, gateBlockMs);
+        log.info("SEMAPHORE", `Account ${credentials.connectionName} gate blocked for ${Math.round(gateBlockMs / 1000)}s [429]`);
       }
     } finally {
       semaphoreRelease();
@@ -501,11 +591,37 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     const errorText = typeof result.error === "string" ? result.error : (result.error?.message || "");
     applyComboTargetExhaustion(provider, credentials.connectionId, model, result.status, errorText, sets, log);
 
+    // Fast-fail: if this failure just tripped the provider circuit breaker
+    // (provider-wide outage), stop walking the remaining connections in this
+    // leg. Without this, a down provider makes the loop visit EVERY account
+    // (each a real network round-trip returning 5xx), burning the whole combo
+    // per-target budget before falling back. Returning here lets the combo
+    // switch to the next model immediately.
+    if (shouldFallback && isProviderFullyBlocked(provider)) {
+      const remainingMs = getProviderShortestCooldownMs(provider);
+      const retryHuman = remainingMs > 0 ? `${Math.ceil(remainingMs / 1000)}s` : "soon";
+      log.warn("GATE", `[${provider}/${model}] circuit breaker opened mid-request — stopping account walk after ${excludeConnectionIds.size + 1} connection(s)`);
+      return unavailableResponse(
+        HTTP_STATUS.SERVICE_UNAVAILABLE,
+        `[${provider}/${model}] Provider temporarily unavailable (circuit breaker open)`,
+        remainingMs > 0 ? new Date(Date.now() + remainingMs).toISOString() : null,
+        retryHuman
+      );
+    }
+
     if (shouldFallback) {
-      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
+      const providerFailures = (sets.providerFailureCounts.get(provider) || 0) + 1;
+      sets.providerFailureCounts.set(provider, providerFailures);
+      const providerLabel = credentials?.providerDisplayName || provider;
+      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT (${providerFailures}/${MAX_PROVIDER_ACCOUNT_FAILURES} ${providerLabel} failures)`);
       excludeConnectionIds.add(credentials.connectionId);
       lastError = result.error;
       lastStatus = result.status;
+      if (providerFailures >= MAX_PROVIDER_ACCOUNT_FAILURES) {
+        sets.exhaustedProviders.add(`${provider}:${model}`);
+        log.warn("FALLBACK", `[${providerLabel}/${model}] reached ${MAX_PROVIDER_ACCOUNT_FAILURES} account failures — skip provider, continue combo`);
+        return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || `[${providerLabel}/${model}] Provider skipped after repeated account failures`);
+      }
       continue;
     }
 

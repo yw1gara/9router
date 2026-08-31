@@ -2,6 +2,15 @@
 // One entry per direction; switch by special format, default handles common providers.
 import { OPENAI_FINISH, CLAUDE_STOP, GEMINI_FINISH } from "../schema/finishReasons.js";
 
+/** Normalize common provider aliases to the OpenAI-compatible tool-call value. */
+export function normalizeToolFinishReason(reason) {
+  if (typeof reason !== "string") return reason;
+  const normalized = reason.toLowerCase().replace(/[-_]/g, "");
+  return normalized === "toolcalls" || normalized === "tooluse" || normalized === "toolcall"
+    ? OPENAI_FINISH.TOOL_CALLS
+    : reason;
+}
+
 // upstream finish/stop reason → OpenAI finish_reason
 export function toOpenAIFinish(reason, format) {
   switch (format) {

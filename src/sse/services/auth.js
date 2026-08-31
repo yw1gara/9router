@@ -1,7 +1,7 @@
-import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
+import { getProviderConnections, getProviderNodeById, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
-import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, isModelAccessDeniedError } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil, isModelAccessDeniedError, accumulateModelLockCooldown, getModelLockAccKey, getModelLockMetaKey, getModelLockKey, MODEL_LOCK_ALL } from "open-sse/services/accountFallback.js";
+import { MAX_RATE_LIMIT_COOLDOWN_MS, BACKOFF_CONFIG } from "open-sse/config/errorConfig.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { disableCodexAccountOnQuota } from "./codexQuotaGuard.js";
 import * as log from "../utils/logger.js";
@@ -10,12 +10,53 @@ import * as log from "../utils/logger.js";
 let selectionMutex = Promise.resolve();
 
 const GITHUB_MONTHLY_USAGE_LIMIT = "you've reached your additional usage limit for your plan";
+const MODEL_RECOVERY_PROVIDERS = new Set([
+  "opencode-zen",
+  "tokenrouter",
+]);
+const RATE_LIMIT_ERROR_RE = /rate[ _-]?limit|too many requests|quota exceeded|free usage limit|freeusagelimiterror|free_rate_limited/i;
+
+function isModelRateLimit(status, errorText) {
+  return Number(status) === 429 || RATE_LIMIT_ERROR_RE.test(String(errorText || ""));
+}
+
+function openCodeZenFreeLimitResetMs(status, errorText, provider) {
+  if (resolveProviderId(provider) !== "opencode-zen" || Number(status) !== 429) return null;
+  if (!/freeusagelimiterror|rate limit exceeded/i.test(String(errorText || ""))) return null;
+  // FreeUsageLimitError is key-scoped. Park this key/model for one hour;
+  // rotating immediately only causes the same limited key to be retried.
+  return Date.now() + 60 * 60 * 1000;
+}
 
 function githubMonthlyResetMs(status, errorText, provider) {
   if (resolveProviderId(provider) !== "github" || Number(status) !== 402) return null;
   if (!String(errorText || "").toLowerCase().includes(GITHUB_MONTHLY_USAGE_LIMIT)) return null;
   const now = new Date();
   return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1);
+}
+
+function orcaPromptCapResetMs(status, errorText, provider) {
+  if (resolveProviderId(provider) !== "orcarouter") return null;
+  const text = String(errorText || "");
+  // OrcaRouter rejects oversized free-tier prompts with a non-retryable 400.
+  // The key remains valid for smaller requests, but parking this model/key for
+  // one hour prevents account fallback from cycling through the same cap.
+  if (Number(status) !== 400 || !/free_rate_limited|err_free_prompt_cap|prompt is longer than the free tier allows/i.test(text)) return null;
+  return Date.now() + 60 * 60 * 1000;
+}
+
+function orcaDailyResetMs(status, errorText, provider) {
+  if (resolveProviderId(provider) !== "orcarouter") return null;
+  const text = String(errorText || "");
+  // Prompt-cap errors have their own short model/key cooldown; do not park a
+  // valid key until midnight for a request-size rejection.
+  if (/err_free_prompt_cap|prompt is longer than the free tier allows/i.test(text)) return null;
+  const isQuotaLimit = isModelRateLimit(status, text)
+    || Number(status) === 403
+    || /free.?model.?capacity|freeusagelimiterror|quota/i.test(text);
+  if (!isQuotaLimit) return null;
+  const now = new Date();
+  return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
 }
 
 /**
@@ -44,18 +85,40 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
     if (FREE_PROVIDERS[providerId]?.noAuth) {
+      // Respect the caller's exclusion: once the Public virtual connection is
+      // exhausted for this request, returning it again would send the fallback
+      // loop in chat.js into an infinite continue-spin (event-loop starvation).
+      if (excludeSet.has("noauth")) {
+        log.info("AUTH", `${providerId} | Public (noauth) connection excluded this request — no credentials`);
+        return null;
+      }
       const settings = await getSettings();
       const override = (settings.providerStrategies || {})[providerId] || {};
       const strategy = override.rotateStrategy || "none";
       let pickedId = override.proxyPoolId || null;
+      let rotationPoolIds = [];
+      // Per-model scope (VansRouter parity): a pool exhausted for one model
+      // stays usable for other models of the same provider.
+      const noAuthScope = `${providerId}::${model || "*"}`;
       if (strategy !== "none") {
         const allPools = await getProxyPools({ isActive: true });
         const poolIds = allPools.filter(p => p.proxyUrl).map(p => p.id);
-        pickedId = pickProxyPoolId(poolIds, strategy, providerId);
+        if (strategy === "smart") {
+          // Populate the fitness read-through cache so smart filtering sees
+          // current scoped cooldowns (same as the multi-pool resolver path).
+          const { loadPoolFitness } = await import("open-sse/services/proxyPoolFitness.js");
+          await Promise.allSettled(poolIds.map((id) => loadPoolFitness(id)));
+        }
+        pickedId = pickProxyPoolId(poolIds, strategy, providerId, { scope: noAuthScope, connectionId: "public" });
+        rotationPoolIds = poolIds;
       }
-      const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" });
+      const resolvedProxy = await resolveConnectionProxyConfig({ proxyPoolId: pickedId || "" }, providerId);
       return {
         id: "noauth",
+        // Consumers key exhaustion marks and model-lock guards on
+        // connectionId === "noauth"; without the field those guards are dead
+        // and per-connection exhaustion keys degenerate to `${provider}:undefined`.
+        connectionId: "noauth",
         connectionName: "Public",
         isActive: true,
         accessToken: "public",
@@ -65,6 +128,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           connectionNoProxy: resolvedProxy.connectionNoProxy,
           connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
           vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+          // Rotation active ⇒ fail closed on a dead proxy (throws into
+          // chatCore's pool rotation) instead of silently egressing direct.
+          strictProxy: resolvedProxy.strictProxy === true || strategy !== "none",
+          proxyRequired: resolvedProxy.proxyRequired === true || strategy === "smart",
+          smartProxy: strategy === "smart",
+          proxyRotationStrategy: strategy,
+          proxyPoolScope: noAuthScope,
+          // Full candidate list lets chatCore's pool-scoped retry rotate the
+          // Public connection off a failed proxy just like real accounts.
+          proxyPoolIds: rotationPoolIds,
         },
       };
     }
@@ -77,10 +150,15 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return null;
     }
 
-    // Filter out model-locked and excluded connections
+    // Filter out model-locked, tagged-unavailable, and excluded connections
     const availableConnections = connections.filter(c => {
       if (excludeSet.has(c.id)) return false;
-      if (isModelLockActive(c, model)) return false;
+      const modelLocked = isModelLockActive(c, model);
+      if (modelLocked) return false;
+      // testStatus is a sticky diagnostic marker. Once requested model lock
+      // expires, do not let stale unavailable status block account reuse.
+      // Account-level unavailable remains blocked by MODEL_LOCK_ALL.
+      if (c.testStatus === "unavailable" && isModelLockActive(c, null)) return false;
       return true;
     });
 
@@ -97,7 +175,11 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     if (availableConnections.length === 0) {
       // Find earliest lock expiry across all connections for retry timing
       const lockedConns = connections.filter(c => isModelLockActive(c, model));
-      const expiries = lockedConns.map(c => getEarliestModelLockUntil(c)).filter(Boolean);
+      // Report the REQUESTED model's lock expiry — the earliest lock across all
+      // models would under-report when a connection holds mixed-model locks.
+      const expiries = lockedConns
+        .map(c => c[getModelLockKey(model)] || c[MODEL_LOCK_ALL])
+        .filter(Boolean);
       const earliest = expiries.sort()[0] || null;
       if (earliest) {
         const earliestConn = lockedConns[0];
@@ -173,7 +255,41 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       connection = availableConnections[0];
     }
 
-    const resolvedProxy = await resolveConnectionProxyConfig(connection.providerSpecificData || {});
+    // Fitness scope is provider::model so smart rotation can apply scoped
+    // cooldowns at request granularity.
+    const proxyScope = model ? `${providerId}::${model}` : `${providerId}::*`;
+
+    // Provider-level proxy default ("Apply Proxy" → Smart / fixed pool on the
+    // provider dashboard): applies to EVERY account of this provider —
+    // including accounts added later — and resolves from the LIVE pool
+    // inventory, so pools added later join automatically. Takes precedence
+    // over per-connection assignments.
+    const proxyApply = providerOverride.proxyApply || null;
+    let proxyInput = connection.providerSpecificData || {};
+    if (proxyApply && proxyApply.strategy && proxyApply.strategy !== "none") {
+      // Explicit provider-level proxy ⇒ fail closed on a dead proxy so
+      // chatCore rotates to another pool instead of egressing direct.
+      proxyInput = { ...proxyInput, strictProxy: true, proxyRequired: true };
+      if (proxyApply.strategy === "fixed" && proxyApply.poolId) {
+        proxyInput = { ...proxyInput, proxyPoolId: proxyApply.poolId };
+      } else {
+        const allPools = await getProxyPools({ isActive: true });
+        const liveIds = allPools.filter((p) => p.proxyUrl).map((p) => p.id);
+        proxyInput = { ...proxyInput, proxyPoolIds: liveIds, proxyRotationStrategy: proxyApply.strategy };
+      }
+    }
+    const resolvedProxy = await resolveConnectionProxyConfig(
+      proxyInput,
+      providerId,
+      null,
+      { scope: proxyScope, connectionId: connection.id || null }
+    );
+
+    let nodeName = null;
+    if (providerId.startsWith("openai-compatible-") || providerId.startsWith("anthropic-compatible-")) {
+      const node = await getProviderNodeById(providerId).catch(() => null);
+      if (node?.name) nodeName = node.name;
+    }
 
     return {
       authType: connection.authType,
@@ -186,6 +302,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       lastRefreshAt: connection.lastRefreshAt,
       projectId: connection.projectId,
       connectionName: connection.displayName || connection.name || connection.email || connection.id,
+      providerDisplayName: nodeName || null,
       copilotToken: connection.providerSpecificData?.copilotToken,
       providerSpecificData: {
         ...(connection.providerSpecificData || {}),
@@ -194,6 +311,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
         connectionNoProxy: resolvedProxy.connectionNoProxy,
         connectionProxyPoolId: resolvedProxy.proxyPoolId || null,
         vercelRelayUrl: resolvedProxy.vercelRelayUrl || "",
+        strictProxy: resolvedProxy.strictProxy === true,
+        proxyRequired: resolvedProxy.proxyRequired === true,
+        smartProxy: resolvedProxy.smartProxy === true,
+        proxyPoolScope: resolvedProxy.proxyPoolScope || proxyScope,
+        proxyPoolIds: Array.isArray(resolvedProxy.proxyPoolIds) ? resolvedProxy.proxyPoolIds : [],
+        proxyRotationStrategy: proxyInput.proxyRotationStrategy || connection.providerSpecificData?.proxyRotationStrategy || null,
       },
       connectionId: connection.id,
       // Include current status for optimization check
@@ -225,12 +348,31 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
 
   // GitHub premium-request exhaustion is account-wide until the next UTC month.
   const githubResetAtMs = githubMonthlyResetMs(status, errorText, provider);
+  const openCodeZenFreeLimitAtMs = openCodeZenFreeLimitResetMs(status, errorText, provider);
+
+  // OrcaRouter free-tier quota resets at 00:00 UTC — lock until then.
+  const orcaResetAtMs = orcaDailyResetMs(status, errorText, provider);
+  const orcaPromptCapResetAtMs = orcaPromptCapResetMs(status, errorText, provider);
 
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
-  let shouldFallback, cooldownMs, newBackoffLevel;
+  let shouldFallback, cooldownMs, newBackoffLevel, accumulate = false;
+  let accumulationBaseMs = null;
   if (githubResetAtMs) {
     shouldFallback = true;
     cooldownMs = githubResetAtMs - Date.now();
+    newBackoffLevel = 0;
+  } else if (openCodeZenFreeLimitAtMs) {
+    shouldFallback = true;
+    cooldownMs = openCodeZenFreeLimitAtMs - Date.now();
+    newBackoffLevel = 0;
+    accumulate = false;
+  } else if (orcaPromptCapResetAtMs) {
+    shouldFallback = true;
+    cooldownMs = orcaPromptCapResetAtMs - Date.now();
+    newBackoffLevel = 0;
+  } else if (orcaResetAtMs) {
+    shouldFallback = true;
+    cooldownMs = Math.max(1000, orcaResetAtMs - Date.now());
     newBackoffLevel = 0;
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
@@ -238,20 +380,52 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     newBackoffLevel = 0;
   } else if (isModelAccessDeniedError(status, errorText)) {
     // Model-access/subscription mismatch: lock THIS model for THIS account for
-    // 5 minutes so the combo skips it without spamming the model. Sibling models
-    // on the same account stay usable — only the denied model is quarantined.
-    // Do NOT touch backoffLevel here: a genuine model denial must not reset the
-    // account's rate-limit escalation state.
+    // 30 minutes so the combo skips it without spamming the model. Sibling
+    // models on the same account stay usable — only the denied model is
+    // quarantined. Do NOT touch backoffLevel here: a genuine model denial must
+    // not reset the account's rate-limit escalation state.
     shouldFallback = true;
-    cooldownMs = 5 * 60 * 1000;
+    cooldownMs = 30 * 60 * 1000;
     newBackoffLevel = backoffLevel;
+    accumulate = true;
   } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
+    const ruleResult = checkFallbackError(status, errorText, backoffLevel);
+    ({ shouldFallback, cooldownMs, newBackoffLevel } = ruleResult);
+    // `fixed` rules (free-tier key limits) park the key for an exact fixed
+    // duration — model-lock accumulation must not double it.
+    accumulate = ruleResult.fixed !== true;
+    // Accumulate from the level-0 base: backoffLevel already escalates the
+    // account-level penalty, and doubling the escalated value on top of it
+    // would compound to ~4^n per consecutive failure instead of 2^n.
+    if (accumulate) accumulationBaseMs = checkFallbackError(status, errorText, 0).cooldownMs;
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
+  // Accumulate repeated model-lock cooldowns: each consecutive failure within
+  // the grace window doubles the lock (base × 2^(n-1)), capped at 24h; the
+  // accumulation resets once the lock has been expired for its own duration.
+  let accUpdate = null;
+  if (accumulate) {
+    ({ cooldownMs, accUpdate } = accumulateModelLockCooldown(conn, model, accumulationBaseMs ?? cooldownMs));
+  }
+
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
+  const lockModel = githubResetAtMs ? null : model;
+  const lockUpdate = buildModelLockUpdate(lockModel, cooldownMs);
+  const providerId = resolveProviderId(provider);
+  const recoveryRateLimit =
+    MODEL_RECOVERY_PROVIDERS.has(providerId) &&
+    Boolean(model) &&
+    isModelRateLimit(status, errorText);
+  const lockMetaUpdate = recoveryRateLimit
+    ? {
+        [getModelLockMetaKey(model)]: {
+          type: "rate_limit",
+          status: Number(status) || null,
+          resetAt: Object.values(lockUpdate)[0],
+        },
+      }
+    : {};
 
   // Codex usage-limit guard: hard-disable the account in the DB until the 24h re-check window.
   // Fail-open: a guard error (e.g. stale lock, missing sqlite3 CLI) must not
@@ -264,14 +438,34 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     }
   }
 
+  const modelScopedLock = Boolean(lockModel);
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
-    testStatus: "unavailable",
+    ...(accUpdate || {}),
+    ...lockMetaUpdate,
+    ...(recoveryRateLimit ? { isActive: true } : {}),
+    // Model cooldown must not make whole account unavailable. This keeps
+    // sibling models eligible and lets account re-enter rotation after expiry.
+    testStatus: modelScopedLock || recoveryRateLimit ? "active" : "unavailable",
     lastError: reason,
     errorCode: status,
     lastErrorAt: new Date().toISOString(),
-    backoffLevel: newBackoffLevel ?? backoffLevel
+    backoffLevel: newBackoffLevel ?? backoffLevel,
   });
+
+  if (recoveryRateLimit) {
+    try {
+      const { reconcileProviderRecoveryAccount } = await import(
+        "./providerRecoveryMonitor.js"
+      );
+      await reconcileProviderRecoveryAccount(connectionId);
+    } catch (recoveryError) {
+      log.warn(
+        "AUTH",
+        `${providerId} recovery reconciliation failed: ${recoveryError?.message || recoveryError}`,
+      );
+    }
+  }
 
   const lockKey = Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
@@ -281,7 +475,10 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
     console.error(`❌ ${provider} [${status}]: ${reason}`);
   }
 
-  return { shouldFallback: true, cooldownMs };
+  // The accumulated (up to 24h) lock is MODEL-scoped; callers that gate the
+  // whole ACCOUNT (e.g. the per-account semaphore) must use the capped value so
+  // a hot model cannot block sibling models on the same account for a day.
+  return { shouldFallback: true, cooldownMs, semaphoreCooldownMs: Math.min(cooldownMs, BACKOFF_CONFIG.max) };
 }
 
 /**
@@ -319,6 +516,14 @@ export async function clearAccountError(connectionId, currentConnection, model =
   });
 
   const clearObj = Object.fromEntries(keysToClear.map(k => [k, null]));
+  // Also reset the accumulation state for every lock we cleared — a cleared
+  // lock (success or manual clear) means the model served traffic again, so
+  // the next failure must start from a fresh accumulation count.
+  for (const k of keysToClear) {
+    const model = k === "modelLock___all" ? null : k.slice("modelLock_".length);
+    clearObj[getModelLockAccKey(model)] = null;
+    clearObj[getModelLockMetaKey(model)] = null;
+  }
 
   // Only reset error state if no active locks remain
   if (remainingActiveLocks.length === 0) {

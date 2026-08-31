@@ -51,13 +51,15 @@ function RecentRequests({ requests = [] }) {
         <div className="flex-1 flex items-center justify-center text-text-muted text-sm">No requests yet.</div>
       ) : (
         <div className="flex-1 overflow-y-auto">
-          <table className="w-full min-w-[300px] border-collapse text-xs">
+          <table className="w-full min-w-0 border-collapse text-[10px]">
             <thead className="sticky top-0 bg-bg z-10">
               <tr className="border-b border-border">
-                <th className="py-1.5 text-left font-semibold text-text-muted w-2"></th>
-                <th className="py-1.5 text-left font-semibold text-text-muted">Model</th>
-                <th className="py-1.5 text-right font-semibold text-text-muted whitespace-nowrap">In / Out</th>
-                <th className="py-1.5 text-right font-semibold text-text-muted">When</th>
+                <th className="py-0.5 text-left font-semibold text-text-muted w-3"></th>
+                <th className="py-0.5 text-left font-semibold text-text-muted max-w-[77px]">Model</th>
+                <th className="py-0.5 text-left font-semibold text-text-muted w-[63px] whitespace-nowrap">Prov</th>
+                <th className="py-0.5 text-right font-semibold text-text-muted whitespace-nowrap w-[58px]">In/Out</th>
+                <th className="py-0.5 text-left font-semibold text-text-muted pl-1 w-[66px]">Key</th>
+                <th className="py-0.5 text-right font-semibold text-text-muted w-[46px]">When</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-border/50">
@@ -65,16 +67,26 @@ function RecentRequests({ requests = [] }) {
                 const ok = !r.status || r.status === "ok" || r.status === "success";
                 return (
                   <tr key={i} className="hover:bg-bg-subtle transition-colors">
-                    <td className="py-1.5">
-                      <span className={`block w-1.5 h-1.5 rounded-full ${ok ? "bg-success" : "bg-error"}`} />
+                    <td className="py-0.5">
+                      <span className={`block w-1 h-1 rounded-full ${ok ? "bg-success" : "bg-error"}`} />
                     </td>
-                    <td className="py-1.5 font-mono truncate max-w-[120px]" title={r.model}>{r.model}</td>
-                    <td className="py-1.5 text-right whitespace-nowrap">
+                    <td className="py-0.5 font-mono truncate max-w-[77px]" title={r.model}>{r.model}</td>
+                    <td className="py-0.5 text-left overflow-hidden max-w-[63px]" title={r.provider || "unknown"}>
+                      <span className="inline-block px-1 py-px rounded text-[8.5px] bg-bg-subtle border border-border/60 text-text-muted truncate max-w-full">
+                        {r.provider || "unknown"}
+                      </span>
+                    </td>
+                    <td className="py-0.5 text-right whitespace-nowrap">
                       <span className="text-primary">{fmt(r.promptTokens)}↑</span>
                       {" "}
                       <span className="text-success">{fmt(r.completionTokens)}↓</span>
                     </td>
-                    <td className="py-1.5 text-right text-text-muted whitespace-nowrap"><TimeAgo timestamp={r.timestamp} /></td>
+                    <td className="py-0.5 text-left pl-1 overflow-hidden max-w-[66px] text-text-muted font-medium" title={r.keyName || "Local"}>
+                      <span className="inline-block px-1 py-px rounded text-[8.5px] bg-bg-subtle border border-border/60 text-text-main truncate max-w-full">
+                        {r.keyName || "Local"}
+                      </span>
+                    </td>
+                    <td className="py-0.5 text-right text-text-muted whitespace-nowrap text-[9.5px]"><TimeAgo timestamp={r.timestamp} /></td>
                   </tr>
                 );
               })}
@@ -355,7 +367,10 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
           Object.entries(stats.byAccount || {}).forEach(([accountKey, data]) => {
             const connPending = stats.pending.byAccount[data.connectionId];
             if (connPending) {
-              const modelKey = data.provider ? `${data.rawModel} (${data.provider})` : data.rawModel;
+              // pending.byAccount keys use the RAW provider id ("model (provider)"),
+              // while stats entries may carry the display name — prefer providerId.
+              const pendingProvider = data.providerId || data.provider;
+              const modelKey = pendingProvider ? `${data.rawModel} (${pendingProvider})` : data.rawModel;
               pendingMap[accountKey] = connPending[modelKey] || 0;
             }
           });
@@ -474,7 +489,7 @@ export default function UsageStats({ period: periodProp, setPeriod: setPeriodPro
 
       {/* Provider topology + Recent Requests */}
       {loading ? spinner : (
-        <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
+        <div className="grid min-w-0 grid-cols-1 items-stretch gap-2 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
           <ProviderTopology
             providers={providers}
             activeRequests={stats.activeRequests || []}

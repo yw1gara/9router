@@ -32,8 +32,13 @@ export async function createBunSqliteAdapter(filePath) {
   }
   const onShutdown = () => gracefulClose();
   const exitAfterGrace = () => {
-    onShutdown();
-    const t = setTimeout(() => process.exit(0), 500);
+    // Close the DB only AFTER the drain grace period (see betterSqliteAdapter
+    // for the race this fixes: closing on signal arrival kills live requests).
+    const SHUTDOWN_GRACE_MS = 1000;
+    const t = setTimeout(() => {
+      onShutdown();
+      process.exit(0);
+    }, SHUTDOWN_GRACE_MS);
     t.unref?.();
   };
   process.once("beforeExit", onShutdown);

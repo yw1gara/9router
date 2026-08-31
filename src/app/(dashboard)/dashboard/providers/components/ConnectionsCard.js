@@ -38,8 +38,9 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
   const proxyBadgeVariant = boundProxyPool?.isActive === true ? "success" : (boundProxyPoolId || hasLegacyProxy) ? "error" : "default";
 
   const modelLockUntil = Object.entries(connection)
-    .filter(([k]) => k.startsWith("modelLock_"))
-    .map(([, v]) => v).filter(Boolean).sort()[0] || null;
+    .filter(([k, v]) => k.startsWith("modelLock_") && v && Number.isFinite(new Date(v).getTime()))
+    .map(([, v]) => new Date(v).getTime())
+    .sort((a, b) => a - b)[0] || null;
 
   useEffect(() => {
     let t = null;
@@ -58,7 +59,7 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
     check();
     if (modelLockUntil) t = setInterval(check, 1000);
     return () => { if (t) clearInterval(t); };
-  }, [modelLockUntil]);
+  }, [modelLockUntil, connection]);
 
   useEffect(() => {
     if (!showProxyDropdown) return;
@@ -70,7 +71,9 @@ function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMov
     return () => document.removeEventListener("mousedown", handler);
   }, [showProxyDropdown]);
 
-  const effectiveStatus = connection.testStatus === "unavailable" && !isCooldown ? "active" : connection.testStatus;
+  // Model cooldown is distinct from account availability. Never relabel an
+  // account-wide unavailable state as active just because its model lock ended.
+  const effectiveStatus = connection.testStatus;
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
@@ -308,7 +311,10 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
     finally { setLoading(false); }
   }, [providerId]);
 
-  useEffect(() => { fetch_(); }, [fetch_]);
+  useEffect(() => {
+    const t = setTimeout(fetch_, 0);
+    return () => clearTimeout(t);
+  }, [fetch_]);
 
   const saveStrategy = async (strategy, stickyLimit) => {
     try {
