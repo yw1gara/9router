@@ -1,3 +1,15 @@
+# v0.5.65 (2026-09-03)
+
+## Features
+- **Fetch**: add Ollama Cloud web fetch provider
+- **Gemini / Antigravity**: add Gemini 3.8 Flash support and bump IDE fingerprint to 2.11.0
+- **Claude**: add Claude Fable 5.1 support, bump Claude Code fingerprint to 2.1.258
+- **Providers**: add client-side status filter (All / Active / Inactive / No connection) on Providers dashboard; add max height scroll to connection list
+- **Providers & Models**: streamline tokenrouter model catalog; refresh Codebuddy-CN catalog (add hy4-preview/hy3/glm-5.3/kimi-k3-1, drop EOL glm-5.0/glm-4.7); add missing provider icons
+- **Models**: capability toggles (vision, reasoning) when adding custom models
+- **CLI tools**: support saving and managing custom API key presets
+- **Quota**: add usage/tracking for Groq via `x-ratelimit-*` headers
+- **i18n**: complete Indonesian translation (1391 keys)
 # v0.5.59 (2026-08-29)
 
 ## Features
