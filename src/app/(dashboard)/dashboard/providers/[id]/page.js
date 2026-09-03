@@ -1208,7 +1208,7 @@ export default function ProviderDetailPage() {
   );
 
   const connectionsList = (
-    <div className="flex min-w-0 flex-col divide-y divide-black/[0.03] dark:divide-white/[0.03]">
+    <div className="flex max-h-[500px] min-w-0 flex-col divide-y divide-black/[0.03] overflow-y-auto pr-1 dark:divide-white/[0.03]">
       {displayConnections
         .map((conn, index) => {
           const priorityIndex = priorityIndexByConnectionId.get(conn.id) ?? index;
