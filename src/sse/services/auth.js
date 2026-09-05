@@ -6,6 +6,26 @@ import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.
 import { disableCodexAccountOnQuota } from "./codexQuotaGuard.js";
 import * as log from "../utils/logger.js";
 
+function friendlyConnectionName(connection, fallback = "connection") {
+  return connection?.displayName?.trim()
+    || connection?.name?.trim()
+    || connection?.email?.trim()
+    || connection?.providerSpecificData?.nodeName?.trim()
+    || fallback;
+}
+
+export function filterConnectionsForModel(providerId, connections, model, settings = {}) {
+  const override = (settings.providerStrategies || {})[providerId] || {};
+  if (providerId !== "freebuff" || override.strictModelAssignment !== true || !model) return connections;
+  return connections.filter((connection) => {
+    const data = connection.providerSpecificData || {};
+    const assignedModel = Object.prototype.hasOwnProperty.call(data, "assignedModel")
+      ? data.assignedModel
+      : data.freebuffModel;
+    return assignedModel === model;
+  });
+}
+
 // Mutex to prevent race conditions during account selection
 let selectionMutex = Promise.resolve();
 
@@ -82,6 +102,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
 
     // Resolve alias to provider ID (e.g., "kc" -> "kilocode")
     const providerId = resolveProviderId(provider);
+    const providerNode = (providerId.startsWith("openai-compatible-") || providerId.startsWith("anthropic-compatible-"))
+      ? await getProviderNodeById(providerId).catch(() => null)
+      : null;
+    const providerDisplayName = providerNode?.name || provider;
 
     // Inject a virtual connection for no-auth free providers (with optional proxy pool from settings)
     if (FREE_PROVIDERS[providerId]?.noAuth) {
@@ -142,13 +166,16 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       };
     }
 
-    const connections = await getProviderConnections({ provider: providerId, isActive: true });
+    let connections = await getProviderConnections({ provider: providerId, isActive: true });
     log.debug("AUTH", `${provider} | total connections: ${connections.length}, excludeIds: ${excludeSet.size > 0 ? [...excludeSet].join(",") : "none"}, model: ${model || "any"}`);
 
     if (connections.length === 0) {
       log.warn("AUTH", `No credentials for ${provider}`);
       return null;
     }
+
+    const settings = await getSettings();
+    connections = filterConnectionsForModel(providerId, connections, model, settings);
 
     // Filter out model-locked, tagged-unavailable, and excluded connections
     const availableConnections = connections.filter(c => {
@@ -162,13 +189,14 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       return true;
     });
 
-    log.debug("AUTH", `${provider} | available: ${availableConnections.length}/${connections.length}`);
+    const providerLabel = connections[0]?.providerDisplayName || provider;
+    log.debug("AUTH", `${providerLabel} | available: ${availableConnections.length}/${connections.length}`);
     connections.forEach(c => {
       const excluded = excludeSet.has(c.id);
       const locked = isModelLockActive(c, model);
       if (excluded || locked) {
         const lockUntil = getEarliestModelLockUntil(c);
-        log.debug("AUTH", `  → ${c.id?.slice(0, 8)} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
+        log.debug("AUTH", `  → ${friendlyConnectionName(c, "unnamed")} | ${excluded ? "excluded" : ""} ${locked ? `modelLocked(${model}) until ${lockUntil}` : ""}`);
       }
     });
 
@@ -183,7 +211,9 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       const earliest = expiries.sort()[0] || null;
       if (earliest) {
         const earliestConn = lockedConns[0];
-        log.warn("AUTH", `${provider} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
+        const providerLabel = earliestConn?.providerDisplayName || friendlyConnectionName(earliestConn, provider);
+        const accountLabel = friendlyConnectionName(earliestConn, "unnamed");
+        log.warn("AUTH", `${providerLabel} | account=${accountLabel} | all ${connections.length} accounts locked for ${model || "all"} (${formatRetryAfter(earliest)}) | lastError=${earliestConn?.lastError?.slice(0, 50)}`);
         return {
           allRateLimited: true,
           retryAfter: earliest,
@@ -192,12 +222,12 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           lastErrorCode: earliestConn?.errorCode || null
         };
       }
-      log.warn("AUTH", `${provider} | all ${connections.length} accounts unavailable`);
+      const providerLabel = connections[0]?.providerDisplayName || friendlyConnectionName(connections[0], provider);
+      const accountLabel = friendlyConnectionName(connections[0], "unnamed");
+      log.warn("AUTH", `${providerLabel} | account=${accountLabel} | all ${connections.length} accounts unavailable`);
       return null;
     }
 
-    const settings = await getSettings();
-    // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
     const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
 
@@ -302,7 +332,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
       lastRefreshAt: connection.lastRefreshAt,
       projectId: connection.projectId,
       connectionName: connection.displayName || connection.name || connection.email || connection.id,
-      providerDisplayName: nodeName || null,
+      providerDisplayName: providerDisplayName || null,
       copilotToken: connection.providerSpecificData?.copilotToken,
       providerSpecificData: {
         ...(connection.providerSpecificData || {}),

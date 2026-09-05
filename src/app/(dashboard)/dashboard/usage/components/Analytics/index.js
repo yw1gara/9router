@@ -371,7 +371,7 @@ export default function UsageAnalytics({ period }) {
           <TopModels items={analytics?.topModels} />
         </Card>
         <Card className="min-w-0 p-4">
-          <PanelHeader icon="speed" title="Latency by provider" description="Rolling observability buffer. TTFT = time to first token." />
+          <PanelHeader icon="speed" title="Latency by provider" description="Latest observed requests buffer (up to 500 samples). TTFT = time to first token." />
           <Latency items={analytics?.latency} />
         </Card>
       </div>

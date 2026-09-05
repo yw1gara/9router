@@ -3,6 +3,7 @@ import { getAdapter } from "@/lib/db/driver.js";
 import { getProviderConnections, getApiKeys } from "@/lib/localDb";
 
 const PERIOD_DAYS = { today: 1, "24h": 1, "7d": 7, "30d": 30, "60d": 60, all: null };
+const VALID_PERIODS = new Set(["today", "24h", "7d", "30d", "60d", "all"]);
 const DIMS = new Set(["provider", "model", "account", "apiKey", "endpoint"]);
 
 function parseJson(s, fb) { try { return s ? JSON.parse(s) : fb; } catch { return fb; } }
@@ -16,6 +17,7 @@ export async function GET(request) {
     const period = searchParams.get("period") || "7d";
     const dim = searchParams.get("dim") || "model";
     const providerFilter = searchParams.get("provider") || null;
+    if (!VALID_PERIODS.has(period)) return NextResponse.json({ error: "Invalid period" }, { status: 400 });
     if (!DIMS.has(dim)) return NextResponse.json({ error: "Invalid dim" }, { status: 400 });
 
     const days = PERIOD_DAYS[period] ?? 7;
@@ -31,13 +33,20 @@ export async function GET(request) {
     const db = await getAdapter();
 
     // Name maps for readable keys.
-    let connNames = {}, keyNames = {};
+    let connNames = {}, keyNames = {}, providerNames = {};
     try {
       for (const c of await getProviderConnections()) connNames[c.id] = c.displayName || c.name || c.email || c.id.slice(0, 8);
     } catch {}
     try {
       for (const k of await getApiKeys()) keyNames[k.key] = k.name || k.key.slice(0, 8);
     } catch {}
+    try {
+      const { getProviderNodes } = await import("@/lib/db/repos/nodesRepo.js");
+      for (const n of await getProviderNodes()) {
+        if (n?.id && n.name) providerNames[n.id] = n.name;
+      }
+    } catch {}
+    const labelProvider = (providerId) => providerNames[providerId] || providerId;
 
     const where = [];
     const params = [];
@@ -54,13 +63,14 @@ export async function GET(request) {
     for (const r of rows) {
       const t = parseJson(r.tokens, {}) || {};
       const cached = Number(t.cached_tokens || t.cache_read_input_tokens || 0) || 0;
+      const providerName = labelProvider(r.provider || "unknown");
       const key =
-        dim === "provider" ? (r.provider || "unknown")
-        : dim === "model" ? `${r.provider || "?"}/${r.model || "?"}`
+        dim === "provider" ? providerName
+        : dim === "model" ? `${providerName}/${r.model || "?"}`
         : dim === "account" ? (r.connectionId ? (connNames[r.connectionId] || r.connectionId.slice(0, 8)) : "Public/no-auth")
         : dim === "apiKey" ? (r.apiKey ? `${keyNames[r.apiKey] || "key"} · ${r.apiKey.slice(0, 6)}…${r.apiKey.slice(-4)}` : "local-no-key")
         : (r.endpoint || "chat");
-      const e = acc.get(key) || { key, requests: 0, errors: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, provider: r.provider || "" };
+      const e = acc.get(key) || { key, requests: 0, errors: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0, provider: providerName };
       const isErr = r.status && r.status !== "ok" && !String(r.status).startsWith("200");
       e.requests += 1;
       if (isErr) e.errors += 1;
@@ -79,7 +89,9 @@ export async function GET(request) {
     }
 
     const items = [...acc.values()].sort((a, b) => b.requests - a.requests);
-    const providers = [...new Set(rows.map((r) => r.provider).filter(Boolean))].sort();
+    const providers = [...new Set(rows.map((r) => r.provider).filter(Boolean))]
+      .sort()
+      .map((id) => ({ id, name: labelProvider(id) }));
 
     return NextResponse.json({ dim, period, totals, items, providers });
   } catch (err) {

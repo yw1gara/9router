@@ -125,6 +125,7 @@ export async function handleChat(request, clientRawRequest = null) {
     // same request.
     const exhaustionSets = {
       exhaustedProviders: new Set(),
+      hardExhaustedProviders: new Set(),
       exhaustedConnections: new Set(),
       transientRateLimitedProviders: new Set(),
       providerFailureCounts: new Map()
@@ -141,7 +142,7 @@ export async function handleChat(request, clientRawRequest = null) {
             const { tools, tool_choice, ...cleanBody } = clientRawRequest.body || {};
             cleanRawReq = { ...clientRawRequest, body: cleanBody };
           }
-          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, targetOptions?.signal ?? null);
+          return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, targetOptions?.signal ?? null, targetOptions);
         },
         log,
         comboName: modelStr,
@@ -156,7 +157,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: augmentedModels,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null),
+        (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null, targetOptions),
         adapterAdded
       ),
       log,
@@ -175,6 +176,7 @@ export async function handleChat(request, clientRawRequest = null) {
     const adapterAdded = soloAugmented.filter((m) => m !== modelStr);
     const exhaustionSets = {
       exhaustedProviders: new Set(),
+      hardExhaustedProviders: new Set(),
       exhaustedConnections: new Set(),
       transientRateLimitedProviders: new Set(),
       providerFailureCounts: new Map()
@@ -184,7 +186,7 @@ export async function handleChat(request, clientRawRequest = null) {
       body,
       models: soloAugmented,
       handleSingleModel: withCapacityAdapterStripping(
-        (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null),
+        (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null, targetOptions),
         adapterAdded
       ),
       log,
@@ -200,7 +202,7 @@ export async function handleChat(request, clientRawRequest = null) {
 /**
  * Handle single model chat request
  */
-async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, exhaustionSets = null, externalSignal = null) {
+async function handleSingleModelChat(body, modelStr, clientRawRequest = null, request = null, apiKey = null, exhaustionSets = null, externalSignal = null, targetOptions = null) {
   const modelInfo = await getModelInfo(modelStr);
 
   // If provider is null, this might be a combo name - check and handle
@@ -229,7 +231,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
             }
             // Forward the panel abort signal — otherwise fusion timeout /
             // straggler aborts never reach the executor fetch.
-            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, targetOptions?.signal ?? null);
+            return handleSingleModelChat(b, m, cleanRawReq, request, apiKey, exhaustionSets, targetOptions?.signal ?? null, targetOptions);
           },
           log,
           comboName: modelStr,
@@ -251,7 +253,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         body,
         models: augmentedModels,
         handleSingleModel: withCapacityAdapterStripping(
-          (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null),
+          (b, m, targetOptions) => handleSingleModelChat(b, m, clientRawRequest, request, apiKey, exhaustionSets, targetOptions?.signal ?? null, targetOptions),
           adapterAdded
         ),
         log,
@@ -308,6 +310,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // connection does not kill healthy sibling connections on the same provider.
   const sets = exhaustionSets || {
     exhaustedProviders: new Set(),
+    hardExhaustedProviders: new Set(),
     exhaustedConnections: new Set(),
     transientRateLimitedProviders: new Set(),
     // Bound account walking per provider within one combo request.
@@ -315,7 +318,18 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   };
   // Backward-compatible for callers that pass older exhaustion set shapes.
   sets.providerFailureCounts ??= new Map();
+  sets.hardExhaustedProviders ??= new Set();
   const MAX_PROVIDER_ACCOUNT_FAILURES = 3;
+
+  // On a 2nd pass retry, if the failure was only SOFT (e.g. transient timeout or lock),
+  // clear request-local exhaustion so the target gets a clean re-probe.
+  if (targetOptions?.retryPass === 2) {
+    const pKey = `${provider}:${model}`;
+    if (!sets.hardExhaustedProviders.has(pKey)) {
+      sets.exhaustedProviders.delete(pKey);
+      log.info("CHAT", `[${pKey}] 2nd pass: cleared soft exhaustion for re-probe`);
+    }
+  }
 
   // Combine the client-request signal and the combo's per-target timeout
   // signal so both abort the fallback loop and release the semaphore.
@@ -407,7 +421,7 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
             continue;
           }
           if (waitDecision.reason === "client_disconnected") {
-            log.info("CHAT", `[${provider}/${model}] client disconnected during cooldown wait — aborting`);
+            log.info("CHAT", `[${credentials?.providerDisplayName || provider}/${model}] client disconnected during cooldown wait — aborting`);
             // Return a minimal response; client is gone anyway.
             return new Response(null, { status: 499 });
           }
@@ -589,7 +603,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // (408/5xx/524) failure marks only this connection exhausted — sibling
     // connections on the same provider stay eligible for the rest of the request.
     const errorText = typeof result.error === "string" ? result.error : (result.error?.message || "");
-    applyComboTargetExhaustion(provider, credentials.connectionId, model, result.status, errorText, sets, log);
+    applyComboTargetExhaustion(provider, credentials.connectionId, model, result.status, errorText, sets, log, {
+      providerDisplayName: credentials?.providerDisplayName,
+      connectionName: credentials?.connectionName,
+    });
 
     // Fast-fail: if this failure just tripped the provider circuit breaker
     // (provider-wide outage), stop walking the remaining connections in this

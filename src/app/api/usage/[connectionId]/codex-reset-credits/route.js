@@ -113,8 +113,8 @@ export async function GET(_request, { params }) {
     return Response.json(result);
   } catch (error) {
     const provider = connection?.provider ?? "unknown";
-    console.warn(`[Codex Reset Credits] ${provider}: ${error.message}`);
-    return Response.json({ error: error.message }, { status: 500 });
+    console.warn(`[Codex Reset Credits] ${provider}: ${error?.message}`);
+    return Response.json({ error: "Failed to fetch Codex reset credits" }, { status: 500 });
   }
 }
 
@@ -143,14 +143,14 @@ export async function POST(request, { params }) {
         connection = retryResult.connection;
         consumeResult = await consumeCodexRateLimitResetCredit(connection.accessToken, redeemRequestId, proxyOptions);
       } catch (retryError) {
-        console.warn(`[Codex Reset Credits] force refresh failed: ${retryError.message}`);
+        console.warn(`[Codex Reset Credits] force refresh failed: ${retryError?.message}`);
       }
     }
 
     return getResponseForConsumeResult(consumeResult, redeemRequestId);
   } catch (error) {
     const provider = connection?.provider ?? "unknown";
-    console.warn(`[Codex Reset Credits] ${provider}: ${error.message}`);
-    return Response.json({ error: error.message }, { status: 500 });
+    console.warn(`[Codex Reset Credits] ${provider}: ${error?.message}`);
+    return Response.json({ error: "Failed to consume Codex reset credit" }, { status: 500 });
   }
 }

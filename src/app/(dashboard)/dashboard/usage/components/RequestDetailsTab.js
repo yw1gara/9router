@@ -301,7 +301,7 @@ export default function RequestDetailsTab() {
                     </td>
                     <td className="max-w-[180px] truncate p-4 text-sm text-text-main">
                        <span className="font-medium">
-                         {getProviderName(detail.provider, providerNameCache)}
+                         {getProviderName(detail.providerDisplayName || detail.provider, providerNameCache)}
                        </span>
                      </td>
                     <td className="p-4 text-sm text-text-main text-right font-mono">
@@ -388,7 +388,7 @@ export default function RequestDetailsTab() {
               </div>
               <div>
                  <span className="text-text-muted">Provider:</span>{" "}
-                 <span className="text-text-main font-medium">{getProviderName(selectedDetail.provider, providerNameCache)}</span>
+                 <span className="text-text-main font-medium">{getProviderName(selectedDetail.providerDisplayName || selectedDetail.provider, providerNameCache)}</span>
                </div>
               <div>
                 <span className="text-text-muted">Model:</span>{" "}

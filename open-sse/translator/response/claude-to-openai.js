@@ -87,6 +87,7 @@ export function claudeToOpenAIResponse(chunk, state) {
       if (chunk.index === state.serverToolBlockIndex) break;
       const delta = chunk.delta;
       if (delta?.type === "text_delta" && delta.text) {
+        state.anyContentEmitted = true;
         results.push(createChunk(state, { content: delta.text }));
       } else if (delta?.type === "thinking_delta" && delta.thinking) {
         results.push(createChunk(state, reasoningDelta(delta.thinking)));
@@ -149,6 +150,15 @@ export function claudeToOpenAIResponse(chunk, state) {
 
       if (chunk.delta?.stop_reason) {
         state.finishReason = convertStopReason(chunk.delta.stop_reason);
+
+        // If stream ends with only thinking/reasoning content and no normal text,
+        // emit a synthetic empty text delta to avoid `APIEmptyResponseError` in AI SDK clients.
+        const hadTextContent = state.textBlockStarted === true && chunk.delta?.stop_reason !== "max_tokens";
+        if (!hadTextContent && !state.anyContentEmitted) {
+          results.push(createChunk(state, { content: "" }));
+          state.anyContentEmitted = true;
+        }
+
         const finalChunk = createChunk(state, {}, state.finishReason);
 
         if (state.usage) {

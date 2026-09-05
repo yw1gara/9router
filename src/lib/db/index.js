@@ -12,7 +12,7 @@ export {
 // Provider connections
 export {
   getProviderConnections, getProviderConnectionById,
-  createProviderConnection, updateProviderConnection,
+  createProviderConnection, createProviderConnectionsBulk, updateProviderConnection,
   deleteProviderConnection, deleteProviderConnectionsByProvider,
   reorderProviderConnections, cleanupProviderConnections,
 } from "./repos/connectionsRepo.js";

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { getRequestDetails } from "@/lib/usageDb";
 import { getProviderConnectionById } from "@/lib/db/repos/connectionsRepo";
+import { getProviderNodes } from "@/lib/db/repos/nodesRepo";
 
 function maskApiKey(key) {
   const value = String(key || "");
@@ -55,6 +56,12 @@ export async function GET(request) {
     if (endDate) filter.endDate = endDate;
     
     const result = await getRequestDetails(filter);
+    const providerNames = {};
+    try {
+      for (const node of await getProviderNodes()) {
+        if (node?.id && node.name) providerNames[node.id] = node.name;
+      }
+    } catch {}
 
     // Redact conversation payloads: the stored details include full request
     // bodies (user prompts, tool calls) and provider responses. Returning them
@@ -71,6 +78,9 @@ export async function GET(request) {
         }
       }
       redacted.apiKeyMask = "";
+      if (providerNames[redacted.provider]) {
+        redacted.providerDisplayName = providerNames[redacted.provider];
+      }
       if (redacted.connectionId) {
         if (!keyByConnectionId.has(redacted.connectionId)) {
           try {

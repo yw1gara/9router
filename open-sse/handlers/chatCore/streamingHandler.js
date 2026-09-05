@@ -78,6 +78,23 @@ async function probeUpstreamStream(providerResponse, stallTimeoutMs) {
 
   if (first && first.done) return { empty: true };
 
+  // Some OpenAI-compatible gateways (e.g. Genspark proxies) return HTTP 200 OK
+  // with the first SSE chunk containing an error notice ("Your Genspark
+  // credits have been exhausted..."). Intercepting it here lets the chat
+  // fallback chain fail over to the next combo target instead of streaming
+  // the billing error to the client.
+  try {
+    const rawFirst = typeof first?.value === "string" ? first.value : new TextDecoder().decode(first?.value);
+    if (/genspark.{0,120}(credit|credits).{0,40}exhausted|credit_exhausted/i.test(rawFirst)) {
+      reader.cancel().catch(() => {});
+      return { empty: true, quotaExhausted: true, quotaMessage: "Genspark credits exhausted" };
+    }
+    if (/model.{0,30}at capacity|at capacity due to high demand|priority-processing|selected model is at capacity/i.test(rawFirst)) {
+      reader.cancel().catch(() => {});
+      return { empty: true, quotaExhausted: true, quotaMessage: "Model at capacity" };
+    }
+  } catch { /* parse failure — proceed with replay stream */ }
+
   return {
     empty: false,
     response: new Response(makeReplayStream(reader, first), {
@@ -150,18 +167,22 @@ export async function handleStreamingResponse({ providerResponse, provider, mode
   const stallTimeoutMs = PROVIDERS[provider]?.stallTimeoutMs || STREAM_STALL_TIMEOUT_MS;
   const probe = await probeUpstreamStream(providerResponse, stallTimeoutMs);
   if (probe.empty) {
-    const msg = probe.stalled
-      ? `Upstream stalled before sending any data (${provider}/${model})`
-      : `Upstream closed the stream without sending any data (${provider}/${model})`;
-    if (log?.errorLine) log.errorLine(reqTag, "✗", `${probe.stalled ? "STREAM STALL" : "EMPTY STREAM"} · ${provider}/${model}`);
-    else console.warn(`[STREAM] ${provider} | ${model} | ${probe.stalled ? "stalled" : "empty"} upstream stream`);
-    streamController?.handleError?.(new Error(probe.stalled ? "stream stalled before first byte" : "upstream empty stream"));
+    const isQuota = probe.quotaExhausted === true;
+    const msg = isQuota
+      ? `Provider quota exhausted (${provider}/${model}): ${probe.quotaMessage || "credits exhausted"}`
+      : probe.stalled
+        ? `Upstream stalled before sending any data (${provider}/${model})`
+        : `Upstream closed the stream without sending any data (${provider}/${model})`;
+    const status = isQuota ? 429 : 502;
+    if (log?.errorLine) log.errorLine(reqTag, "✗", `${isQuota ? "QUOTA EXHAUSTED" : probe.stalled ? "STREAM STALL" : "EMPTY STREAM"} · ${provider}/${model}`);
+    else console.warn(`[STREAM] ${provider} | ${model} | ${isQuota ? "quota exhausted" : probe.stalled ? "stalled" : "empty"} upstream stream`);
+    streamController?.handleError?.(new Error(isQuota ? "provider quota exhausted" : probe.stalled ? "stream stalled before first byte" : "upstream empty stream"));
     return {
       success: false,
-      status: 502,
+      status,
       error: msg,
       response: new Response(JSON.stringify({ error: { message: msg } }), {
-        status: 502,
+        status,
         headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' },
       }),
     };

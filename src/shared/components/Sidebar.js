@@ -36,7 +36,6 @@ const debugItems = [
 ];
 
 const systemItems = [
-  { href: "/dashboard/freebuff", label: "FreeBuff", icon: "bolt" },
   { href: "/dashboard/proxy-pools", label: "Proxy Pools", icon: "lan" },
   { href: "/dashboard/mail-recovery", label: "Mail Recovery", icon: "mail_lock" },
   { href: "/dashboard/skills", label: "Skills", icon: "extension" },

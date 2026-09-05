@@ -172,9 +172,9 @@ export async function GET(request, { params }) {
         const result = await refreshAndUpdateCredentials(connection, false, proxyOptions);
         connection = result.connection;
       } catch (refreshError) {
-        console.error("[Usage API] Credential refresh failed:", refreshError);
+        console.error("[Usage API] Credential refresh failed:", refreshError?.message);
         return Response.json({
-          error: `Credential refresh failed: ${refreshError.message}`
+          error: "Credential refresh failed. Please re-authorize the connection."
         }, { status: 401 });
       }
     }
@@ -190,7 +190,7 @@ export async function GET(request, { params }) {
         connection = retryResult.connection;
         usage = await getUsageForProvider(connection, proxyOptions, { force });
       } catch (retryError) {
-        console.warn(`[Usage] ${connection.provider}: force refresh failed: ${retryError.message}`);
+        console.warn(`[Usage] ${connection.provider}: force refresh failed: ${retryError?.message}`);
       }
     }
 
@@ -201,7 +201,7 @@ export async function GET(request, { params }) {
     return Response.json(usage);
   } catch (error) {
     const provider = connection?.provider ?? "unknown";
-    console.warn(`[Usage] ${provider}: ${error.message}`);
-    return Response.json({ error: error.message }, { status: 500 });
+    console.warn(`[Usage] ${provider}: ${error?.message}`);
+    return Response.json({ error: "Failed to fetch quota usage for connection" }, { status: 500 });
   }
 }

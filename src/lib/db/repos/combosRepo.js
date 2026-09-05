@@ -8,6 +8,7 @@ function rowToCombo(row) {
     id: row.id,
     name: row.name,
     kind: row.kind,
+    contextLength: row.context_length || null,
     models: parseJson(row.models, []),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
@@ -39,13 +40,14 @@ export async function createCombo(data) {
     id: uuidv4(),
     name: data.name,
     kind: data.kind || null,
+    contextLength: Number.isInteger(data.contextLength) && data.contextLength > 0 ? data.contextLength : null,
     models: data.models || [],
     createdAt: now,
     updatedAt: now,
   };
   db.run(
-    `INSERT INTO combos(id, name, kind, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?)`,
-    [combo.id, combo.name, combo.kind, stringifyJson(combo.models), combo.createdAt, combo.updatedAt]
+    `INSERT INTO combos(id, name, kind, context_length, models, createdAt, updatedAt) VALUES(?, ?, ?, ?, ?, ?, ?)`,
+    [combo.id, combo.name, combo.kind, combo.contextLength, stringifyJson(combo.models), combo.createdAt, combo.updatedAt]
   );
   return combo;
 }
@@ -56,10 +58,15 @@ export async function updateCombo(id, data) {
   db.transaction(() => {
     const row = db.get(`SELECT * FROM combos WHERE id = ?`, [id]);
     if (!row) return;
-    const merged = { ...rowToCombo(row), ...data, updatedAt: new Date().toISOString() };
+    const merged = {
+      ...rowToCombo(row),
+      ...data,
+      contextLength: data.contextLength !== undefined ? (Number.isInteger(data.contextLength) && data.contextLength > 0 ? data.contextLength : null) : (row.context_length || null),
+      updatedAt: new Date().toISOString()
+    };
     db.run(
-      `UPDATE combos SET name = ?, kind = ?, models = ?, updatedAt = ? WHERE id = ?`,
-      [merged.name, merged.kind, stringifyJson(merged.models || []), merged.updatedAt, id]
+      `UPDATE combos SET name = ?, kind = ?, context_length = ?, models = ?, updatedAt = ? WHERE id = ?`,
+      [merged.name, merged.kind, merged.contextLength, stringifyJson(merged.models || []), merged.updatedAt, id]
     );
     result = merged;
   });

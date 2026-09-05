@@ -124,7 +124,18 @@ export function geminiToOpenAIResponse(chunk, state) {
     if (finishReason === OPENAI_FINISH.STOP && state.geminiToolCallCount > 0) {
       finishReason = OPENAI_FINISH.TOOL_CALLS;
     }
-    
+
+    // If stream ends with only thinking/reasoning content and no normal text,
+    // emit a synthetic empty text delta to avoid `APIEmptyResponseError` in AI SDK clients.
+    const hasTextContent = results.some(chunk => {
+      const delta = chunk?.choices?.[0]?.delta;
+      return delta && Object.prototype.hasOwnProperty.call(delta, "content");
+    });
+    if (!hasTextContent) {
+      const emptyChunk = buildChunk(chunkMeta(state), { content: "" }, null);
+      results.push(emptyChunk);
+    }
+
     const finalChunk = buildChunk(chunkMeta(state), {}, finishReason);
     
     // Include usage in final chunk for downstream translators

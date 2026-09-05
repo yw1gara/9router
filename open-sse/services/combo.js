@@ -581,6 +581,32 @@ export async function handleComboChat({ body, models, handleSingleModel, log, co
     }
   }
 
+  // 2nd pass retry: if all models failed on the 1st pass, sweep all eligible
+  // combo targets once more in case their transient cooldown/lock expired while
+  // other targets were running. Bounded: skip denied/hard-failed targets, pass
+  // retryPass: 2 so soft exhaustion is cleared per target, and abort if client gone.
+  if (!signal?.aborted && rotatedModels.length > 1) {
+    for (let j = 0; j < rotatedModels.length; j++) {
+      if (signal?.aborted) break;
+      const candidate = rotatedModels[j];
+      if (!candidate || isTargetDeniedAliasAware(candidate)) continue;
+      log.info("COMBO", `2nd pass: re-probing target ${j + 1}/${rotatedModels.length}: ${candidate}`);
+      try {
+        const secondAttempt = await handleSingleModel(body, candidate, {
+          signal: signal ?? undefined,
+          retryPass: 2
+        });
+        if (secondAttempt.ok) {
+          log.info("COMBO", `2nd pass succeeded on ${candidate}`);
+          clearTargetFailure(comboName, candidate);
+          return secondAttempt;
+        }
+      } catch (err) {
+        log.warn("COMBO", `2nd pass failed on ${candidate}: ${err.message}`);
+      }
+    }
+  }
+
   // All models failed
   // ALWAYS 503 (Service Unavailable): every fallback-eligible target was tried
   // and failed, so the aggregate condition is "temporarily unavailable, retry

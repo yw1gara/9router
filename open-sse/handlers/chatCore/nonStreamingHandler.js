@@ -11,6 +11,7 @@ import { appendRequestLog, saveRequestDetail } from "@/lib/usageDb.js";
 import { decloakToolNames } from "../../utils/claudeCloaking.js";
 import { detectDegenerateLoop, DEGENERATE_TAIL_WINDOW } from "../../utils/degenerate.js";
 import { noteTargetFailure } from "../../services/combo.js";
+import { isProviderExhaustedReason } from "../../services/accountFallback.js";
 import { ROLE, RESPONSES_ITEM } from "../../translator/schema/index.js";
 
 function parseToolArguments(value) {
@@ -325,6 +326,18 @@ export async function handleNonStreamingResponse({ providerResponse, provider, m
   }
 
   reqLogger.logProviderResponse(providerResponse.status, providerResponse.statusText, providerResponse.headers, responseBody);
+
+  // Some gateways return quota failures as HTTP 200 with an error message.
+  // Convert that fake success into a retryable response for combo fallback.
+  const responseText = extractAssistantTextForGuard(responseBody)
+    || (typeof responseBody?.error === "string" ? responseBody.error : JSON.stringify(responseBody?.error || ""));
+  if (isProviderExhaustedReason(responseText)) {
+    const isCapacity = /model.{0,30}at capacity|at capacity due to high demand|priority-processing|selected model is at capacity/i.test(responseText);
+    appendLog({ status: `FAILED ${isCapacity ? 503 : 429} provider_${isCapacity ? "capacity" : "quota_exhausted"}` });
+    return createErrorResult(isCapacity ? 503 : 429, isCapacity
+      ? `Provider model at capacity (${provider}/${model})`
+      : `Provider quota exhausted (${provider}/${model})`);
+  }
 
   // Degenerate-output guard (non-stream): a model stuck in a repetition loop
   // produced garbage. Treat the leg as FAILED so the account/combo fallback can

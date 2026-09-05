@@ -56,11 +56,7 @@ export default function CombosPage() {
   const [confirmState, setConfirmState] = useState(null);
   const { copied, copy } = useCopyToClipboard();
 
-  useEffect(() => {
-    fetchData();
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       const [combosRes, providersRes, settingsRes] = await Promise.all([
         fetch("/api/combos"),
@@ -70,8 +66,7 @@ export default function CombosPage() {
       const combosData = await combosRes.json();
       const providersData = await providersRes.json();
       const settingsData = settingsRes.ok ? await settingsRes.json() : {};
-      
-      // Only LLM combos here - webSearch/webFetch combos belong to media-providers/web
+
       if (combosRes.ok) setCombos((combosData.combos || []).filter(c => !c.kind || c.kind === "llm"));
       if (providersRes.ok) {
         setActiveProviders(providersData.connections || []);
@@ -88,7 +83,12 @@ export default function CombosPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(fetchData, 0);
+    return () => clearTimeout(t);
+  }, [fetchData]);
 
   const handleSetCapacityAdapter = async (next) => {
     setCapacityAdapter(next);
@@ -653,6 +653,7 @@ function ModelItem({ id, index, model, isFirst, isLast, onEdit, onMoveUp, onMove
 function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindFilter = null }) {
   // Initialize state with combo values - key prop on parent handles reset on remount
   const [name, setName] = useState(combo?.name || "");
+  const [contextLength, setContextLength] = useState(combo?.contextLength ? String(combo.contextLength) : "");
   const [models, setModels] = useState(combo?.models || []);
   const [showModelSelect, setShowModelSelect] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -690,7 +691,9 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
   };
 
   useEffect(() => {
-    if (isOpen) fetchModalData();
+    if (!isOpen) return undefined;
+    const t = setTimeout(fetchModalData, 0);
+    return () => clearTimeout(t);
   }, [isOpen]);
 
   const validateName = (value) => {
@@ -743,8 +746,14 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
 
   const handleSave = async () => {
     if (!validateName(name)) return;
+    const trimmedCtx = contextLength.trim();
+    const parsedCtx = trimmedCtx === "" ? null : Number(trimmedCtx);
+    if (trimmedCtx !== "" && (!Number.isInteger(parsedCtx) || parsedCtx <= 0 || parsedCtx > 2_000_000)) {
+      alert("Max context length must be a positive integer up to 2000000");
+      return;
+    }
     setSaving(true);
-    await onSave({ name: name.trim(), models });
+    await onSave({ name: name.trim(), models, contextLength: parsedCtx });
     setSaving(false);
   };
 
@@ -769,6 +778,19 @@ function ComboFormModal({ isOpen, combo, onClose, onSave, activeProviders, kindF
             />
             <p className="text-[10px] text-text-muted mt-0.5">
               Only letters, numbers, -, _ and . allowed
+            </p>
+          </div>
+
+          <div>
+            <Input
+              label="Max Context Length (optional)"
+              value={contextLength}
+              onChange={(e) => setContextLength(e.target.value.replace(/[^0-9]/g, ""))}
+              placeholder="e.g. 128000"
+              inputMode="numeric"
+            />
+            <p className="text-[10px] text-text-muted mt-0.5">
+              Advertised via /v1/models. Leave blank for automatic/unlimited.
             </p>
           </div>
 

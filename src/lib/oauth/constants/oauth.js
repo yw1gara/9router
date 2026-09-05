@@ -120,6 +120,9 @@ export const CODEBUDDY_INTL_CONFIG = { ...PROVIDER_OAUTH["codebuddy-intl"] };
 // Kimchi OAuth Configuration (Browser token callback flow)
 export const KIMCHI_CONFIG = { ...PROVIDER_OAUTH["kimchi"] };
 
+// Freebuff OAuth Configuration (Device Code Flow)
+export const FREEBUFF_CONFIG = { ...PROVIDER_OAUTH["freebuff"] };
+
 // Grok CLI / Grok Build OAuth Configuration (Device Code Flow)
 // Endpoint: cli-chat-proxy.grok.com — same client_id as xai, different flow + scopes
 export const GROK_CLI_CONFIG = { ...PROVIDER_OAUTH["grok-cli"] };
@@ -220,6 +223,7 @@ export const PROVIDERS = {
   CODEBUDDY_INTL: "codebuddy-intl",
   KIMCHI: "kimchi",
   GROK_CLI: "grok-cli",
+  FREEBUFF: "freebuff",
   TRAE: "trae",
   WINDSURF: "windsurf",
   ZED: "zed",

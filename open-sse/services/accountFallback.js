@@ -606,15 +606,21 @@ export function isProviderExhaustedReason(result) {
   // Specific patterns only — avoid false positives on transient errors that
   // happen to contain the word "exhausted" (e.g. "exhausted all retries").
   // Covers both word orders: "quota exhausted" and "exhausted your quota".
-  return /credits?.{0,20}exhausted|exhausted.{0,20}credits?|quota.{0,20}exhausted|exhausted.{0,20}quota|no remaining credits|insufficient.{0,20}credits|payment.{0,10}required|quota.{0,20}exceeded|rate.?limit.{0,20}reached/i.test(text);
+  // Genspark sends the exact marketing line "Your Genspark credits have been
+  // exhausted. Please visit https://www.genspark.ai/pricing?fromurl=credit_exhausted…"
+  // both as a 4xx body and as 200-OK stream/JSON content — match the URL
+  // marker and the phrase so combo fallback treats it as quota exhaustion.
+  return /genspark.{0,120}(credit|credits).{0,40}exhausted|credit_exhausted|credits?.{0,20}exhausted|exhausted.{0,20}credits?|quota.{0,20}exhausted|exhausted.{0,20}quota|no remaining credits|insufficient.{0,20}credits|payment.{0,10}required|quota.{0,20}exceeded|rate.?limit.{0,20}reached|model.{0,30}at capacity|at capacity due to high demand|selected model is at capacity|priority.?processing|overloaded_error/i.test(text);
 }
 
 /**
  * Update per-request combo exhaustion without globally disabling sibling accounts.
  * Returns true only when the provider itself is considered exhausted.
  */
-export function applyComboTargetExhaustion(provider, connectionId, model, status, errorText, sets, log) {
+export function applyComboTargetExhaustion(provider, connectionId, model, status, errorText, sets, log, labels = {}) {
   if (!provider || !sets) return false;
+  const providerLabel = labels.providerDisplayName || provider;
+  const connectionLabel = labels.connectionName || String(connectionId || "").slice(0, 8) || "unknown";
 
   // Model-access denials (e.g. 403 "model_not_allowed") are MODEL-scoped:
   // mark only provider:model so sibling models on the SAME connection remain
@@ -622,6 +628,7 @@ export function applyComboTargetExhaustion(provider, connectionId, model, status
   // 401/403 auth branch, which would wrongly exhaust the whole account.
   if (model && isModelAccessDeniedError(status, errorText)) {
     sets.exhaustedProviders.add(`${provider}:${model}`);
+    sets.hardExhaustedProviders?.add(`${provider}:${model}`);
     // Persist the denial across requests (30 min) — but ONLY for the noAuth
     // "Public" connection (no `connectionId` field / "noauth"): it has no DB
     // row to model-lock. EXCEPT status 401: OpenCode's "Free promotion has
@@ -632,32 +639,48 @@ export function applyComboTargetExhaustion(provider, connectionId, model, status
     if ((connectionId === "noauth" || connectionId == null) && Number(status) !== 401) {
       noteTargetDenied(`${provider}/${model}`, undefined, typeof errorText === "string" ? errorText.slice(0, 300) : "");
     }
-    log?.info?.("COMBO", `Provider ${provider} model ${model} access denied (${status}) — excluding only this model, connection stays eligible`);
+    log?.info?.("COMBO", `Provider ${providerLabel} model ${model} access denied (${status}) — excluding only this model, connection stays eligible`);
     return false;
   }
 
-  // OrcaRouter free-tier 429 (code free_rate_limited): either a rate window
-  // (Retry-After header) or a per-request prompt cap. Retrying the SAME
-  // model+prompt inside this request is pointless in both cases — skip the
-  // model for the rest of the request without punishing the account (paid
-  // models on the same key still work; account cooldown is handled
-  // separately by markAccountUnavailable).
-  if (Number(status) === 429 && /free_rate_limited/i.test(errorText)) {
-    if (model) sets.exhaustedProviders.add(`${provider}:${model}`);
-    log?.info?.("COMBO", `Provider ${provider} model ${model || "*"} free-tier 429 (free_rate_limited) — excluding model for this request`);
+  // OrcaRouter free-tier limits are request/model scoped, not account scoped.
+  // Prompt-cap responses can arrive as HTTP 400, while rate-window responses
+  // usually arrive as HTTP 429. Do not mark every account red for same prompt:
+  // that creates noisy false account failures and cannot succeed by rotating key.
+  const orcaFreeLimit = /free_rate_limited|err_free_prompt_cap/i.test(String(errorText || ""));
+  if ((Number(status) === 400 || Number(status) === 429) && orcaFreeLimit) {
+    if (model) {
+      sets.exhaustedProviders.add(`${provider}:${model}`);
+      sets.hardExhaustedProviders?.add(`${provider}:${model}`);
+    }
+    log?.info?.("COMBO", `Provider ${providerLabel} model ${model || "*"} free-tier limit (${status}) — excluding model for this request`);
     return false;
   }
 
   const isAuthError = status === 401 || status === 403;
   const isConnectionError = [408, 500, 502, 503, 504, 524].includes(status);
 
+  // Upstream model at capacity (xAI "The model is currently at capacity due to
+  // high demand … priority-processing", codex "selected model is at capacity",
+  // etc.). Capacity is per-model, not per-account: retrying another account on
+  // the same model cannot succeed, so exclude only this model for the rest of
+  // the request and let the combo fail over to the next model/provider.
+  // Checked BEFORE the connection branch (5xx would otherwise rotate accounts
+  // pointlessly and turn every sibling account red).
+  if (model && /model.{0,30}at capacity|at capacity due to high demand|selected model is at capacity|priority.?processing|free.?model.?capacity|overloaded_error/i.test(String(errorText || ""))) {
+    sets.exhaustedProviders.add(`${provider}:${model}`);
+    sets.hardExhaustedProviders?.add(`${provider}:${model}`);
+    log?.info?.("COMBO", `Provider ${providerLabel} model ${model} at capacity (${status}) — skipping model for this request, next target`);
+    return true;
+  }
+
   if (isAuthError || isConnectionError) {
     if (connectionId) {
       sets.exhaustedConnections.add(`${provider}:${connectionId}`);
-      log?.info?.("COMBO", `Provider ${provider} connection ${String(connectionId).slice(0, 8)} error (${status}) — excluding remaining targets`);
+      log?.info?.("COMBO", `Provider ${providerLabel} connection ${connectionLabel} error (${status}) — excluding remaining targets`);
     } else {
       sets.exhaustedProviders.add(`${provider}:${model || "*"}`);
-      log?.info?.("COMBO", `Provider ${provider} error (${status}) — excluding remaining targets`);
+      log?.info?.("COMBO", `Provider ${providerLabel} error (${status}) — excluding remaining targets`);
     }
     return false;
   }
@@ -666,7 +689,8 @@ export function applyComboTargetExhaustion(provider, connectionId, model, status
     // Quota scopes differ by upstream. Keep this request-local skip model-scoped
     // so a sibling model can still use a healthy account/provider.
     sets.exhaustedProviders.add(`${provider}:${model || "*"}`);
-    log?.info?.("COMBO", `Provider ${provider} model ${model || "*"} quota exhausted — excluding remaining targets`);
+    sets.hardExhaustedProviders?.add(`${provider}:${model || "*"}`);
+    log?.info?.("COMBO", `Provider ${providerLabel} model ${model || "*"} quota exhausted — excluding remaining targets`);
     return true;
   }
 

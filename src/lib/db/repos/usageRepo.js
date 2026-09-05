@@ -55,8 +55,9 @@ function getLocalDateKey(timestamp) {
 }
 
 function addToCounter(target, key, values) {
-  if (!target[key]) target[key] = { requests: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
+  if (!target[key]) target[key] = { requests: 0, errors: 0, promptTokens: 0, completionTokens: 0, cachedTokens: 0, cost: 0 };
   target[key].requests += values.requests || 1;
+  target[key].errors += values.error ? 1 : 0;
   target[key].promptTokens += values.promptTokens || 0;
   target[key].completionTokens += values.completionTokens || 0;
   target[key].cachedTokens += values.cachedTokens || 0;
@@ -69,9 +70,11 @@ function aggregateEntryToDay(day, entry) {
   const completionTokens = entry.tokens?.completion_tokens || entry.tokens?.output_tokens || 0;
   const cachedTokens = entry.tokens?.cached_tokens || entry.tokens?.cache_read_input_tokens || 0;
   const cost = entry.cost || 0;
-  const vals = { promptTokens, completionTokens, cachedTokens, cost };
+  const isErr = isErrorStatus(entry.status);
+  const vals = { promptTokens, completionTokens, cachedTokens, cost, error: isErr };
 
   day.requests = (day.requests || 0) + 1;
+  day.errors = (day.errors || 0) + (isErr ? 1 : 0);
   day.promptTokens = (day.promptTokens || 0) + promptTokens;
   day.completionTokens = (day.completionTokens || 0) + completionTokens;
   day.cachedTokens = (day.cachedTokens || 0) + cachedTokens;
@@ -183,6 +186,10 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
   const modelKey = provider ? `${model} (${provider})` : model;
   const timerKey = `${connectionId}|${modelKey}`;
   const apiKeyKey = maskApiKey(apiKey) || "local-no-key";
+  // Keep watchdog state per aggregate key, but refcount concurrent requests so
+  // one completion cannot cancel another request's watchdog.
+  const timerState = pendingTimers[timerKey] || { handle: null, count: 0 };
+  if (started) timerState.count += 1;
 
   if (!pendingRequests.byModel[modelKey]) pendingRequests.byModel[modelKey] = 0;
   pendingRequests.byModel[modelKey] = Math.max(0, pendingRequests.byModel[modelKey] + (started ? 1 : -1));
@@ -225,21 +232,40 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
   }
 
   if (started) {
-    clearTimeout(pendingTimers[timerKey]);
-    pendingTimers[timerKey] = setTimeout(() => {
+    clearTimeout(timerState.handle);
+    timerState.handle = setTimeout(() => {
       delete pendingTimers[timerKey];
       if (pendingRequests.byModel[modelKey] > 0) pendingRequests.byModel[modelKey] = 0;
-      if (connectionId && pendingRequests.byAccount[connectionId]?.[modelKey] > 0) {
-        pendingRequests.byAccount[connectionId][modelKey] = 0;
+      delete pendingRequests.byModel[modelKey];
+      if (connectionId && pendingRequests.byAccount[connectionId]) {
+        delete pendingRequests.byAccount[connectionId][modelKey];
+        if (Object.keys(pendingRequests.byAccount[connectionId]).length === 0) {
+          delete pendingRequests.byAccount[connectionId];
+        }
       }
-      if (pendingRequests.byApiKey[apiKeyKey]?.[modelKey] > 0) {
-        pendingRequests.byApiKey[apiKeyKey][modelKey] = 0;
+      if (pendingRequests.byApiKey[apiKeyKey]) {
+        delete pendingRequests.byApiKey[apiKeyKey][modelKey];
+        if (Object.keys(pendingRequests.byApiKey[apiKeyKey]).length === 0) {
+          delete pendingRequests.byApiKey[apiKeyKey];
+        }
+      }
+      if (apiKeyKey !== "local-no-key" && pendingRequests.apiKeyAccounts?.[apiKeyKey]) {
+        if (connectionId) delete pendingRequests.apiKeyAccounts[apiKeyKey][connectionId];
+        if (Object.keys(pendingRequests.apiKeyAccounts[apiKeyKey]).length === 0) {
+          delete pendingRequests.apiKeyAccounts[apiKeyKey];
+        }
       }
       scheduleStatsEvent("pending");
     }, PENDING_TIMEOUT_MS);
+    pendingTimers[timerKey] = timerState;
   } else {
-    clearTimeout(pendingTimers[timerKey]);
-    delete pendingTimers[timerKey];
+    timerState.count = Math.max(0, timerState.count - 1);
+    if (timerState.count === 0) {
+      clearTimeout(timerState.handle);
+      delete pendingTimers[timerKey];
+    } else {
+      pendingTimers[timerKey] = timerState;
+    }
   }
 
   if (!started && error && provider) {
@@ -254,15 +280,18 @@ export function trackPendingRequest(model, provider, connectionId, started, erro
 export async function getActiveRequests() {
   const activeRequests = [];
   const connectionMap = await getConnectionMapCached();
+  const providerNodeNames = await getProviderNodeNameMapCached();
 
   for (const [connectionId, models] of Object.entries(pendingRequests.byAccount)) {
     for (const [modelKey, count] of Object.entries(models)) {
       if (count > 0) {
         const accountName = connectionMap[connectionId] || `Account ${connectionId.slice(0, 8)}...`;
         const match = modelKey.match(/^(.*) \((.*)\)$/);
+        const rawProvider = match ? match[2] : "unknown";
         activeRequests.push({
           model: match ? match[1] : modelKey,
-          provider: match ? match[2] : "unknown",
+          provider: providerNodeNames[rawProvider] || rawProvider,
+          providerId: rawProvider,
           account: accountName, count,
         });
       }
@@ -271,7 +300,6 @@ export async function getActiveRequests() {
 
   await ensureRingInitialized();
   const apiKeyNames = await getApiKeyNameMapCached();
-  const providerNodeNames = await getProviderNodeNameMapCached();
   const seen = new Set();
   const recentRequests = [...recentRing.items]
     .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
@@ -338,30 +366,6 @@ export async function saveRequestUsage(entry) {
     // All 3 writes (history insert, daily upsert, lifetime counter) in ONE transaction.
     // better-sqlite3 is sync → no JS yield mid-transaction → no race in same process.
     db.transaction(() => {
-      const existing = db.get(
-        `SELECT id, endpoint FROM usageHistory
-         WHERE timestamp = ?
-           AND COALESCE(provider, '') = COALESCE(?, '')
-           AND COALESCE(model, '') = COALESCE(?, '')
-           AND COALESCE(connectionId, '') = COALESCE(?, '')
-           AND COALESCE(apiKey, '') = COALESCE(?, '')
-           AND promptTokens = ?
-           AND completionTokens = ?
-         ORDER BY id DESC LIMIT 1`,
-        [
-          entry.timestamp, entry.provider || null, entry.model || null,
-          entry.connectionId || null, entry.apiKey || null,
-          promptTokens, completionTokens,
-        ]
-      );
-
-      if (existing) {
-        if (!existing.endpoint && entry.endpoint) {
-          db.run(`UPDATE usageHistory SET endpoint = ? WHERE id = ?`, [entry.endpoint, existing.id]);
-        }
-        return;
-      }
-
       db.run(
         `INSERT INTO usageHistory(timestamp, provider, model, connectionId, apiKey, endpoint, promptTokens, completionTokens, cost, status, tokens, meta) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
@@ -407,8 +411,10 @@ export async function getUsageHistory(filter = {}) {
   if (filter.startDate) { conds.push("timestamp >= ?"); params.push(new Date(filter.startDate).toISOString()); }
   if (filter.endDate) { conds.push("timestamp <= ?"); params.push(new Date(filter.endDate).toISOString()); }
 
+  const parsedLimit = Number.parseInt(filter.limit, 10);
+  const safeLimit = Math.max(1, Math.min(Number.isFinite(parsedLimit) ? parsedLimit : 1000, 10000));
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
-  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id DESC LIMIT ${Math.min(Number(filter.limit) || 1000, 10000)}`, params);
+  const rows = db.all(`SELECT timestamp, provider, model, connectionId, apiKey, endpoint, cost, status, tokens FROM usageHistory ${where} ORDER BY id DESC LIMIT ${safeLimit}`, params);
 
   return rows.map((r) => ({
     timestamp: r.timestamp, provider: r.provider, model: r.model,
@@ -905,8 +911,14 @@ function bumpAnalyticsMap(map, key, values = {}) {
   item.cachedTokens += values.cachedTokens || 0;
   item.tokens += values.totalTokens || values.tokens || 0;
   item.cost += values.cost || 0;
-  if (values.error) item.errors += 1;
-  else item.ok += 1;
+  if (typeof values.errors === "number") {
+    item.errors += values.errors;
+    item.ok += Math.max(0, (values.requests || 0) - values.errors);
+  } else if (values.error) {
+    item.errors += 1;
+  } else {
+    item.ok += 1;
+  }
   if (values.meta) Object.assign(item, values.meta);
   return item;
 }
@@ -1070,13 +1082,14 @@ export async function getUsageAnalytics(period = "7d") {
       cachedTokens: day.cachedTokens || 0,
       totalTokens: (day.promptTokens || 0) + (day.completionTokens || 0),
       cost: day.cost || 0,
+      errors: day.errors || 0,
     });
-    // usageDaily counters are camelCase (promptTokens) — tokensFromRow reads
+    // usageDaily counters are camelCase (promptTokens) — tokensFromDayValues reads
     // snake_case token payloads, so map explicitly to avoid zeroed breakdowns.
     const tokensFromDayValues = (values = {}) => {
-      const promptTokens = values.promptTokens || 0;
-      const completionTokens = values.completionTokens || 0;
-      const cachedTokens = values.cachedTokens || 0;
+      const promptTokens = values.promptTokens || values.prompt_tokens || 0;
+      const completionTokens = values.completionTokens || values.completion_tokens || 0;
+      const cachedTokens = values.cachedTokens || values.cached_tokens || 0;
       return { promptTokens, completionTokens, cachedTokens, totalTokens: promptTokens + completionTokens };
     };
 
@@ -1088,9 +1101,11 @@ export async function getUsageAnalytics(period = "7d") {
         velocity[idx].requests = day.requests || 0;
         velocity[idx].tokens = tokenInfo.totalTokens;
         velocity[idx].cost = tokenInfo.cost;
+        velocity[idx].errors = tokenInfo.errors;
       }
 
       summary.requests += day.requests || 0;
+      summary.errors += tokenInfo.errors;
       summary.promptTokens += tokenInfo.promptTokens;
       summary.completionTokens += tokenInfo.completionTokens;
       summary.cachedTokens += tokenInfo.cachedTokens;
@@ -1100,7 +1115,7 @@ export async function getUsageAnalytics(period = "7d") {
       for (const [provider, values] of Object.entries(day.byProvider || {})) {
         const providerLabel = labelProvider(provider);
         const tokenInfoP = tokensFromDayValues(values);
-        bumpAnalyticsMap(providerMap, providerLabel, { ...tokenInfoP, requests: values.requests, cost: values.cost || 0, error: false, meta: { provider: providerLabel } });
+        bumpAnalyticsMap(providerMap, providerLabel, { ...tokenInfoP, requests: values.requests, errors: values.errors || 0, cost: values.cost || 0, error: false, meta: { provider: providerLabel } });
       }
 
       for (const [modelKey, values] of Object.entries(day.byModel || {})) {
@@ -1110,6 +1125,7 @@ export async function getUsageAnalytics(period = "7d") {
         bumpAnalyticsMap(modelMap, `${rawModel}|${provider}`, {
           ...tokenInfoM,
           requests: values.requests,
+          errors: values.errors || 0,
           cost: values.cost || 0,
           error: false,
           meta: { model: rawModel, provider },
@@ -1123,6 +1139,7 @@ export async function getUsageAnalytics(period = "7d") {
         bumpAnalyticsMap(connectionAgg, connectionId, {
           ...tokenInfoC,
           requests: values.requests,
+          errors: values.errors || 0,
           cost: values.cost || 0,
           error: false,
           meta: {
@@ -1142,16 +1159,15 @@ export async function getUsageAnalytics(period = "7d") {
       `SELECT COALESCE(provider, 'unknown') AS provider, COALESCE(model, 'unknown') AS model,
               COALESCE(status, 'ok') AS status, COUNT(*) AS n
        FROM usageHistory
-       WHERE timestamp >= ?
+       WHERE timestamp >= ? AND timestamp <= ?
        GROUP BY provider, model, status`,
-      [start.toISOString()],
+      [start.toISOString(), end.toISOString()],
     );
     for (const group of groupedRows) {
       const status = normalizeStatus(group.status);
       statusMap[status] = (statusMap[status] || 0) + Number(group.n || 0);
       if (isErrorStatus(group.status)) {
         const n = Number(group.n || 0);
-        summary.errors += n;
         const providerLabel = labelProvider(group.provider);
         const errKey = `${providerLabel}|${group.model}`;
         // n rows are ALL error rows for this pair — requests must match so
@@ -1250,9 +1266,11 @@ export async function appendRequestLog() {}
 export async function getRecentLogs(limit = 200) {
   try {
     const db = await getAdapter();
+    const parsedLimit = Number.parseInt(limit, 10);
+    const safeLimit = Math.max(1, Math.min(Number.isFinite(parsedLimit) ? parsedLimit : 200, 1000));
     const rows = db.all(
       `SELECT timestamp, provider, model, connectionId, promptTokens, completionTokens, status, tokens FROM usageHistory ORDER BY id DESC LIMIT ?`,
-      [limit],
+      [safeLimit],
     );
     if (!rows.length) return [];
 

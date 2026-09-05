@@ -352,6 +352,7 @@ export async function buildModelsList(kindFilter, options = {}) {
       object: "model",
       owned_by: "combo",
     };
+    if (combo.contextLength) entry.context_length = combo.contextLength;
     const comboCaps = getComboCapabilities(combo.name, combos);
     const inputModalities = capabilitiesToInputModalities(comboCaps);
     if (comboCaps) entry.capabilities = comboCaps;

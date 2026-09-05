@@ -84,6 +84,8 @@ export const ERROR_RULES = [
   // Free-tier KEY limits (orcarouter / opencode-zen / qoder): rate limit is
   // per API key, recovery is slow. Park 30 minutes, escalate ×2 to the 24h
   // cap; account fallback rotates to a healthy key meanwhile.
+  { text: "err_free_prompt_cap", cooldownMs: 60 * 60 * 1000, fixed: true },
+  { text: "free_rate_limited", cooldownMs: 60 * 60 * 1000, fixed: true },
   { text: "freeusagelimiterror", cooldownMs: 30 * 60 * 1000 },
   { text: "free model capacity", cooldownMs: 30 * 60 * 1000 },
   { text: "pricingurl", cooldownMs: 30 * 60 * 1000 },

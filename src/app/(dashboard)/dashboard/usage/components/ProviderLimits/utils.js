@@ -571,8 +571,6 @@ export function parseQuotaData(provider, data) {
           });
         }
         break;
-        }
-        break;
 
       case "ollama":
         // Session (5h) / Weekly (7d) usage % from ollama.com/api/usage.

@@ -115,7 +115,9 @@ export default function BreakdownTab({ period }) {
           className="rounded-lg border border-black/10 bg-transparent px-2 py-1.5 text-xs dark:border-white/10"
         >
           <option value="">All providers</option>
-          {(data?.providers || []).map((p) => <option key={p} value={p}>{p}</option>)}
+          {(data?.providers || []).map((p) => (
+            <option key={p.id ?? p} value={p.id ?? p}>{(p.name ?? p)}</option>
+          ))}
         </select>
         <input
           value={search}

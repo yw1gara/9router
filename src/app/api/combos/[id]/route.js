@@ -4,6 +4,16 @@ import { resetComboRotation } from "open-sse/services/combo.js";
 
 // Validate combo name: only a-z, A-Z, 0-9, -, _
 const VALID_NAME_REGEX = /^[a-zA-Z0-9_.\-]+$/;
+const MAX_CONTEXT_LENGTH = 2_000_000;
+
+export function validateContextLength(value) {
+  if (value === null || value === undefined || value === "") return { ok: true, value: null };
+  const n = Number(value);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0 || n > MAX_CONTEXT_LENGTH) {
+    return { ok: false, error: `context_length must be a positive integer up to ${MAX_CONTEXT_LENGTH}` };
+  }
+  return { ok: true, value: n };
+}
 
 // GET /api/combos/[id] - Get combo by ID
 export async function GET(request, { params }) {
@@ -39,6 +49,13 @@ export async function PUT(request, { params }) {
       if (existing && existing.id !== id) {
         return NextResponse.json({ error: "Combo name already exists" }, { status: 400 });
       }
+    }
+
+    if ("context_length" in body || "contextLength" in body) {
+      const val = body.context_length ?? body.contextLength;
+      const v = validateContextLength(val);
+      if (!v.ok) return NextResponse.json({ error: v.error }, { status: 400 });
+      body.contextLength = v.value;
     }
     
     // Capture previous name to invalidate rotation state on rename

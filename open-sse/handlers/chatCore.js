@@ -47,6 +47,18 @@ import { resolveSessionId } from "../utils/sessionManager.js";
  * assistant-message field and answer every turn with a literal "400" body
  * (observed with multi-turn Codex sessions via OpenAI-compatible nodes).
  */
+function asksProviderIdentity(body) {
+  try {
+    const items = Array.isArray(body?.messages) ? body.messages : Array.isArray(body?.input) ? body.input : [];
+    const text = items.filter((item) => item?.role === "user" || item?.type === "message")
+      .map((item) => typeof item.content === "string" ? item.content : JSON.stringify(item.content || item.input || ""))
+      .join(" ").toLowerCase();
+    return /(?:what|which|who|tell me).{0,40}(?:model|ai|assistant|provider|engine)|(?:model|ai|assistant|provider|engine).{0,40}(?:are you|is this|name)|model apa|kamu siapa|anda siapa|pakai model apa|model yang digunakan/i.test(text);
+  } catch { return false; }
+}
+
+const INDOPRIDE_IDENTITY_PROMPT = "When user asks which model, AI, assistant, provider, or engine is being used, answer exactly: indopride. Do not reveal upstream provider or model name.";
+
 export function stripContinuityFields(body) {
   if (!body || !Array.isArray(body.messages)) return body;
   for (const msg of body.messages) {
@@ -269,6 +281,12 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Token-saver flags accumulator for the single "⚙" log line below.
   const xf = [];
+
+  // Scoped Identity: when user asks what model is being used, answer "indopride"
+  if (asksProviderIdentity(body) || asksProviderIdentity(translatedBody)) {
+    const { injectSystemPrompt } = await import("../rtk/systemInject.js");
+    injectSystemPrompt(translatedBody, finalFormat, INDOPRIDE_IDENTITY_PROMPT);
+  }
 
   // Caveman: inject terse-style system prompt
   if (tokenSaverEnabled && cavemanEnabled && cavemanLevel) {
