@@ -119,6 +119,34 @@ Default URLs:
 - Dashboard: `http://localhost:20128/dashboard`
 - OpenAI-compatible API: `http://localhost:20128/v1`
 
+### Production with PM2
+
+```bash
+npm run build
+npm install -g pm2
+pm2 start .next/standalone/custom-server.js --name 9router --cwd .next/standalone
+pm2 save
+pm2 startup
+```
+
+Verify the gateway:
+
+```bash
+curl -I http://127.0.0.1:20128/v1/models
+```
+
+### Local Headroom setup (optional)
+
+Headroom compresses request context before provider routing and fails open if unavailable:
+
+```bash
+python3 -m pip install "headroom-ai[proxy,code]" --break-system-packages
+pm2 start /usr/local/bin/headroom --name headroom --interpreter none -- proxy --host 127.0.0.1 --port 8787 --code-aware
+pm2 save
+```
+
+Enable `Compress context (Headroom)` in Dashboard → Token Saver only after status shows `Running`. Keep port `8787` loopback-only; use the authenticated 9Router proxy path for its dashboard.
+
 ---
 
 ## Video Guides
@@ -371,6 +399,11 @@ Default URLs:
         <b>Vertex AI</b><br/>
         <sub>Gemini 3 Pro + GLM-5 + DeepSeek<br/>$300 credits free</sub>
       </td>
+      <td align="center" width="150">
+        <img src="./public/providers/freebuff.png" width="70" alt="FreeBuff"/><br/>
+        <b>FreeBuff</b><br/>
+        <sub>OAuth device code<br/>Free model catalog varies</sub>
+      </td>
     </tr>
   </table>
 </div>
@@ -518,7 +551,8 @@ a third party under a provider named "Self-hosted".
 | 🪨 **Caveman Mode** ([Caveman](https://github.com/JuliusBrussee/caveman) ⭐52K)   | Inject caveman-speak prompt → LLM replies terse, technical substance preserved           | Save **up to 65% output tokens**                  |
 | 🐴 **Ponytail** ([Ponytail](https://github.com/DietrichGebert/ponytail))          | Inject "lazy senior dev" prompt → LLM writes minimal, YAGNI-first code (Lite/Full/Ultra) | **Fewer output tokens, less refactoring**         |
 | 🎯 **Smart 3-Tier Fallback**                                                      | Auto-route: Subscription → Cheap → Free                                                  | Never stop coding, zero downtime                  |
-| 📊 **Real-Time Quota Tracking**                                                   | Live token count + reset countdown                                                       | Maximize subscription value                       |
+| 🔁 **Resilient Combo Retry**                                                      | 2nd-pass sweep retries targets whose transient cooldown expired mid-request; hard quota/capacity denials are skipped instantly | Fewer hard failures, no re-prompt                 |
+| 📊 **Real-Time Quota Tracking**                                                   | Live token count + reset countdown (Codex, Groq `x-ratelimit-*`, FreeBuff, more)         | Maximize subscription value                       |
 | 🔄 **Format Translation**                                                         | OpenAI ↔ Claude ↔ Gemini ↔ Cursor ↔ Kiro ↔ Vertex                                        | Works with any CLI tool                           |
 | 👥 **Multi-Account Support**                                                      | Multiple accounts per provider                                                           | Load balancing + redundancy                       |
 | 🔄 **Auto Token Refresh**                                                         | OAuth tokens refresh automatically                                                       | No manual re-login needed                         |
